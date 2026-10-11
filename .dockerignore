@@ -1,0 +1,27 @@
+# 构建上下文排除本机凭据、依赖与运行产物。
+.git
+.env
+.env.*
+!.env.example
+data
+**/node_modules
+**/dist
+**/build
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+.audit-tests
+.local-test-temp
+**/*.egg-info
+**/*.pyc
+**/*.tsbuildinfo
+**/test-results
+**/playwright-report
+**/coverage
+.vscode
+.idea
+*.log
+*.pem
+*.key
+*.p12

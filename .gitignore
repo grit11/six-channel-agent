@@ -1,0 +1,44 @@
+# 凭据、本地数据库、依赖和运行输出不进入版本管理。
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.audit-tests/
+.local-test-temp/
+*.pyc
+node_modules/
+dist/
+data/
+*.egg-info/
+*.tsbuildinfo
+test-results/
+playwright-report/
+
+# 编辑器、系统元数据与本机 Python 环境。
+.vscode/
+.idea/
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地报告、数据库、备份与证书不进入发布仓库。
+coverage/
+.coverage
+.coverage.*
+htmlcov/
+*.log
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.dump
+*.bak
+*.pem
+*.key
+*.p12

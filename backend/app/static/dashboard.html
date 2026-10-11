@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<!--
+六经辨证 Agent Console V1.0：独立原生医生侧工作台。
+职责：原生 HTML/CSS/JS 实现脉证录入、Top-K 证据卡片、SSE 进度、鉴别、医生审核和经典速查。
+边界：页面不能生成医学结论；候选数据只能来自 API。无 React、无 CDN、无后端医学规则。
+依赖：同源 FastAPI /api/v1 会诊、知识与解析接口；服务故障明确报错，不返回固定示例候选。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="/console-static/favicon.svg" type="image/svg+xml">
+  <title>六经·辨证工作台 | SixChannel Agent</title>
+  <style>
+    /* 界面风格：深海军蓝侧栏、玉石绿强调、温暖纸张底色；不依赖网络字体或图片。 */
+    :root {
+      --ink:#152a39; --muted:#768492; --deep:#102936; --deep2:#183b48;
+      --teal:#126f64; --teal2:#1a9c8a; --mint:#e3f3ee;
+      --bg:#f3f5f3; --card:#ffffff; --stroke:#e2e8e7;
+      --amber:#c58a42; --orange:#f5e7d2; --red:#b85e5d;
+      --radius:18px; --shadow:0 8px 28px rgba(17,46,55,.045);
+      font-family:Inter,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+    }
+    *{box-sizing:border-box}
+    html{height:100%}
+    body{margin:0;background:var(--bg);color:var(--ink);font-size:14px;min-width:340px}
+    button,input,textarea{font:inherit}
+    button{cursor:pointer}
+    button:disabled{opacity:.48;cursor:not-allowed}
+    a{color:inherit}
+    .shell{display:flex;min-height:100vh}
+    .sidebar{width:224px;flex:0 0 224px;background:linear-gradient(180deg,#102a38 0%,#09232f 100%);color:#fff;display:flex;flex-direction:column;padding:30px 17px 20px;position:sticky;top:0;height:100vh}
+    .brand{display:flex;gap:12px;align-items:center;padding:0 9px 35px}
+    .mark{width:39px;height:39px;border:1px solid #478879;border-radius:12px;display:grid;place-items:center;background:rgba(61,142,123,.17);position:relative;overflow:hidden}
+    .mark:before{content:"";position:absolute;width:50px;height:1px;background:#62b5a2;transform:rotate(-38deg);opacity:.45}
+    .mark strong{font-family:Georgia,"SimSun",serif;font-size:22px;font-weight:400;color:#d9f0e7;z-index:1}
+    .brand-title{font-size:17px;font-weight:700;letter-spacing:1px}
+    .brand-sub{color:#8bacb7;font-size:10px;letter-spacing:1.5px;margin-top:4px}
+    .nav-label{color:#678996;font-size:10px;letter-spacing:2px;margin:0 13px 12px;font-weight:700}
+    .nav{display:flex;flex-direction:column;gap:7px}
+    .nav-btn{display:flex;align-items:center;gap:12px;color:#a1b8c0;background:none;border:0;padding:13px 14px;border-radius:11px;text-align:left;font-weight:600;font-size:13px;transition:.2s}
+    .nav-btn:hover,.nav-btn.active{background:#254b54;color:#eafff9}
+    .nav-btn.active{box-shadow:inset 3px 0 0 #6dc8b1}
+    .nav-icon{width:18px;height:18px;display:grid;place-items:center;font-size:16px;font-weight:400}
+    .sidebar-bottom{margin-top:auto;border-top:1px solid #254451;padding:19px 7px 0}
+    .system-status{display:flex;gap:8px;align-items:center;color:#c2d8db;font-size:12px}
+    .led{width:8px;height:8px;border-radius:50%;background:#66bfa6;box-shadow:0 0 0 4px rgba(102,191,166,.12)}
+    .side-foot{color:#75939d;font-size:11px;line-height:1.8;margin-top:15px}
+    .main{flex:1;min-width:0}
+    .topbar{height:76px;background:rgba(255,255,255,.9);border-bottom:1px solid var(--stroke);padding:0 36px;display:flex;align-items:center;justify-content:space-between;gap:14px}
+    .crumb{display:flex;align-items:center;gap:11px;color:#82919a;font-size:12px}
+    .crumb strong{color:#38505b;font-weight:700}
+    .topright{display:flex;align-items:center;gap:17px}
+    .top-separator{height:27px;width:1px;background:#e2e9e7}
+    .avatar{width:36px;height:36px;border-radius:11px;background:#e8f2ed;display:grid;place-items:center;color:var(--teal);font-weight:800}
+    .user-name{font-size:12px;font-weight:700}.user-role{font-size:10px;color:var(--muted);margin-top:3px}
+    .top-icon{color:#677f84;font-size:17px;background:transparent;border:0;padding:5px}
+    .main-content{max-width:1630px;margin:0 auto;padding:31px 36px 35px}
+    .view{display:none}.view.active{display:block}
+    .page-title{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:22px}
+    .eyebrow{font-size:11px;letter-spacing:2.3px;color:var(--teal);font-weight:800;text-transform:uppercase;margin-bottom:6px}
+    h1,h2,h3,p{margin-top:0}
+    h1{font-size:26px;font-weight:750;letter-spacing:-.5px;margin-bottom:6px}
+    .subtitle{color:var(--muted);font-size:12px;line-height:1.8;margin:0}
+    .badge{display:inline-flex;align-items:center;gap:7px;border:1px solid #d6e3df;background:#f5faf8;color:#417365;border-radius:100px;padding:7px 12px;font-size:11px;font-weight:700;white-space:nowrap}
+    .badge.warning{background:#fff8ec;color:#a4763e;border-color:#f0e0c7}
+    .intro{display:grid;grid-template-columns:1.4fr .8fr;gap:15px;background:var(--deep);color:white;border-radius:20px;padding:24px 27px;margin-bottom:18px;position:relative;overflow:hidden;min-height:128px}
+    .intro:after{content:"";position:absolute;right:-82px;top:-120px;width:410px;height:350px;border-radius:50%;border:1px solid rgba(124,203,180,.13);box-shadow:0 0 0 40px rgba(67,138,121,.05),0 0 0 94px rgba(67,138,121,.035);pointer-events:none}
+    .intro:before{content:"";position:absolute;right:165px;bottom:-95px;width:200px;height:200px;border:1px solid rgba(124,203,180,.12);transform:rotate(35deg);pointer-events:none}
+    .intro .hero-kicker{font-size:10px;letter-spacing:2.8px;color:#78c0ae;font-weight:800;margin-bottom:9px}
+    .intro h2{font-size:20px;line-height:1.45;font-weight:700;margin:0 0 9px}
+    .intro p{color:#aec6cd;font-size:12px;line-height:1.8;max-width:700px;margin:0}
+    .intro-stats{position:relative;z-index:1;display:flex;justify-content:flex-end;align-items:center;gap:16px}
+    .intro-num{text-align:center;min-width:73px;padding:0 7px}
+    .intro-num+.intro-num{border-left:1px solid #365561;padding-left:20px}
+    .intro-num strong{display:block;font-size:27px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.2}
+    .intro-num span{display:block;font-size:10px;color:#a1c2c5;margin-top:9px;white-space:nowrap}
+    .tri-panel{display:grid;grid-template-columns:minmax(267px,.91fr) minmax(330px,1.20fr) minmax(270px,.94fr);align-items:stretch;gap:15px}
+    .panel{border:1px solid var(--stroke);background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);min-width:0}
+    .panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:21px 22px 13px}
+    .panel-head h3{font-size:15px;font-weight:800;margin:0 0 4px}
+    .panel-head .section-sub{color:var(--muted);font-size:11px}
+    .num-tag{color:#a1b2b7;font-size:11px;letter-spacing:1px;font-weight:700}
+    .clinical-panel{display:flex;flex-direction:column}
+    .clinical-body{padding:4px 22px 20px;flex:1;display:flex;flex-direction:column}
+    .field-label{display:flex;justify-content:space-between;margin:9px 0 9px;font-weight:700;font-size:12px}
+    .field-label span{font-weight:500;color:#a0aeb2;font-size:10px}
+    textarea{width:100%;border:1px solid #dbe5e3;background:#f8faf9;border-radius:11px;resize:vertical;outline:none;color:var(--ink);font-size:12px;padding:13px 14px;line-height:1.9;transition:border-color .2s,box-shadow .2s}
+    textarea:focus,input:focus{border-color:#88baa9;box-shadow:0 0 0 3px rgba(27,143,120,.09)}
+    #clinicalText{min-height:167px}
+    textarea::placeholder,input::placeholder{color:#a5b1b1}
+    .sample-box{margin-top:12px;padding:12px 13px;border:1px dashed #cbdcda;border-radius:10px;background:#f7faf9}
+    .sample-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+    .sample-head strong{font-size:11px;color:#40615e}
+    .sample-box p{font-size:11px;line-height:1.65;color:#849597;margin:0}
+    .text-link{background:none;border:0;color:var(--teal);font-weight:750;font-size:11px;padding:0}
+    .divider{height:1px;background:#ecf0ef;margin:18px 0 13px}
+    .mini-title{font-size:11px;color:#6d8387;font-weight:750;margin-bottom:10px;display:flex;justify-content:space-between}
+    .chips{display:flex;flex-wrap:wrap;gap:7px;min-height:33px;align-content:start}
+    .chip{border-radius:6px;font-size:10px;font-weight:650;padding:6px 9px;border:1px solid transparent;line-height:1.35}
+    .chip.positive{background:#e9f5ef;color:#38816c}
+    .chip.negative{background:#fbefeb;color:#b36b55}
+    .chip.unknown{background:#f3f4f5;color:#89949c}
+    .chip.channel{background:#edf5f4;color:#246d66;border:1px solid #d6e9e5}
+    .bottom-actions{margin-top:auto;padding-top:20px}
+    .primary-btn{border:none;border-radius:11px;padding:13px 18px;color:#fff;background:linear-gradient(100deg,#126e61,#188b78);font-size:12px;font-weight:780;box-shadow:0 7px 17px rgba(19,119,101,.17);transition:.15s}
+    .primary-btn:hover:not(:disabled){filter:brightness(1.1);transform:translateY(-1px)}
+    .primary-btn:active:not(:disabled){transform:translateY(0)}
+    .primary-btn.full{display:block;width:100%}
+    .outline-btn{border:1px solid #d9e5e1;background:white;color:#45656a;border-radius:10px;padding:10px 13px;font-size:11px;font-weight:700}
+    .outline-btn:hover{background:#f5faf8;border-color:#a3c8c0}
+    .helper{font-size:10px;color:#98a5a7;text-align:center;margin:11px 0 0}
+    .results-panel{display:flex;flex-direction:column}
+    .result-head{padding-bottom:16px}
+    .panel-note{font-size:11px;padding:9px 11px;background:#f8f4eb;color:#a17c4b;border-radius:8px;margin:0 21px 13px;line-height:1.6}
+    .result-body{padding:0 16px 15px;display:flex;flex-direction:column;gap:10px;flex:1}
+    .result-card{border:1px solid #e2e9e7;border-radius:13px;padding:15px;cursor:pointer;transition:.17s;position:relative;background:#fff}
+    .result-card:hover{border-color:#b0d5c8;transform:translateY(-1px)}
+    .result-card.selected{border:1.5px solid #4b9e8a;background:linear-gradient(140deg,#f5fbf8 0%,#fff 78%);box-shadow:0 4px 12px rgba(34,116,92,.07)}
+    .result-card.selected:before{content:"";position:absolute;left:0;top:17px;bottom:17px;width:3px;background:var(--teal);border-radius:3px}
+    .result-top{display:flex;gap:8px;align-items:center;justify-content:space-between}
+    .result-rank{font-size:10px;font-weight:800;color:#d29349;letter-spacing:1.3px}
+    .result-score{font-size:21px;font-weight:800;letter-spacing:-1px;font-variant-numeric:tabular-nums;color:var(--teal)}
+    .result-score span{font-size:10px;font-weight:650;letter-spacing:0;color:#8fa19f;margin-left:3px}
+    .result-name{font-size:14px;font-weight:800;margin:2px 0 5px}
+    .result-desc{font-size:10px;color:#849298;margin:0 0 12px}
+    .progress-line{height:5px;background:#e8efec;border-radius:4px;overflow:hidden;margin-bottom:13px}
+    .progress-fill{height:100%;background:linear-gradient(90deg,#229d85,#80c3aa);border-radius:4px}
+    .result-card:not(.selected) .progress-fill{background:#bdc9c5}
+    .result-footer{display:flex;align-items:center;justify-content:space-between;gap:4px}
+    .result-footer span{font-size:10px;color:#6e8f88}
+    .result-footer strong{font-size:10px;color:var(--teal)}
+    .empty-state{display:flex;align-items:center;justify-content:center;flex-direction:column;min-height:320px;text-align:center;color:#94a5a7}
+    .empty-ring{width:75px;height:75px;border-radius:50%;border:1px dashed #c6d8d3;background:#f5faf8;display:grid;place-items:center;font-size:31px;color:#7eaba2;margin-bottom:15px}
+    .empty-state strong{font-size:13px;color:#617c83;margin-bottom:7px}
+    .empty-state p{font-size:11px;line-height:1.8;max-width:240px;margin:0}
+    .evidence-panel{display:flex;flex-direction:column}
+    .evidence-top{padding:3px 21px 17px;display:flex;gap:8px;flex-wrap:wrap}
+    .evidence-section{padding:15px 20px 12px;border-top:1px solid #eef2f0}
+    .evidence-section-heading{display:flex;align-items:center;justify-content:space-between;font-weight:760;font-size:11px;margin-bottom:11px;color:#435e65}
+    .evidence-section-heading .small-count{font-size:10px;color:#98a8aa}
+    .evidence-list{display:flex;flex-wrap:wrap;gap:7px;min-height:26px}
+    .source-item{border:1px solid #e6ebe9;border-radius:10px;padding:11px 12px;margin-bottom:8px;cursor:pointer;transition:.15s;background:#fafcfb}
+    .source-item:hover{border-color:#a4cec2}
+    .source-item .source-top{font-size:10px;color:#247467;font-weight:750;margin-bottom:4px}
+    .source-item .source-text{line-height:1.55;font-size:11px;color:#647882;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .small-empty{font-size:11px;color:#abb7b8;line-height:1.7}
+    .under-grid{display:grid;grid-template-columns:1.15fr 1fr;gap:15px;margin-top:15px}
+    .pipeline{padding:2px 22px 20px}
+    .pipeline-head{display:flex;align-items:center;justify-content:space-between;padding:20px 22px 14px}
+    .pipeline-head h3{margin:0;font-size:15px}
+    .pipeline-head span{font-size:11px;color:#8aa09f}
+    .step-row{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:7px}
+    .step{border-radius:11px;background:#f7f9f8;border:1px solid #edf1ef;padding:13px 5px 11px;text-align:center;min-width:0}
+    .step-dot{width:28px;height:28px;display:grid;place-items:center;border-radius:50%;margin:0 auto 10px;background:#e5ecea;color:#9aacad;font-size:12px}
+    .step.active .step-dot{background:#def3eb;color:#1d8c75}
+    .step.finished .step-dot{background:#257c69;color:#fff}
+    .step-label{font-size:10px;color:#7d9192;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .step.finished .step-label{color:#286c60;font-weight:700}
+    .step-detail{color:#8a9b9c;font-size:10px;line-height:1.8;margin:12px 3px 0}
+    .supplement{padding:3px 22px 21px}
+    .question-box{border-radius:11px;padding:14px 15px;background:#f7faf9;border:1px solid #e1edeb;font-size:12px;line-height:1.8;color:#46666a;min-height:72px}
+    .supplement textarea{min-height:70px;margin-top:12px}
+    .supplement-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}
+    .review-strip{margin-top:15px;padding:20px 24px;background:linear-gradient(105deg,#fff 60%,#f6fbf8 100%);display:flex;justify-content:space-between;align-items:center;gap:22px}
+    .review-title{font-size:13px;font-weight:800;margin-bottom:5px}
+    .review-desc{font-size:11px;color:#809396;line-height:1.7}
+    .review-actions{display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end}
+    .review-strip input{min-width:180px;max-width:290px;padding:9px 11px;border:1px solid #dce7e3;border-radius:9px;outline:none;background:#fff;font-size:11px}
+    .warning-bar{margin:15px 0 0;color:#8e806a;line-height:1.7;font-size:11px;padding:10px 13px;background:#fff9ef;border:1px solid #f5ead8;border-radius:10px}
+    .k-search{display:flex;gap:10px;margin:19px 0}
+    .k-search input{flex:1;border-radius:12px;border:1px solid var(--stroke);background:#fff;padding:15px 17px;outline:none}
+    .k-results{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+    .k-card{padding:19px 20px;background:#fff;border:1px solid var(--stroke);border-radius:15px;cursor:pointer;min-width:0;transition:.15s}
+    .k-card:hover{border-color:#9bcaba;transform:translateY(-1px)}
+    .k-card strong{display:block;font-size:13px;margin:8px 0 8px}
+    .k-card p{font-size:12px;color:#748589;line-height:1.75;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;margin:0}
+    .k-card .clause-tag{font-size:10px;color:var(--teal);font-weight:800}
+    .trace-shell{padding:23px;background:#fff;border:1px solid var(--stroke);border-radius:var(--radius)}
+    .trace-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:17px}
+    .trace-head strong{font-size:15px}
+    .traces{display:flex;flex-direction:column;gap:8px}
+    .trace{display:grid;grid-template-columns:145px 1fr 90px;gap:12px;align-items:center;padding:13px 16px;border:1px solid #edf2ef;border-radius:10px;font-size:11px}
+    .trace-time{color:#a2b0b4}.trace-title{color:#496c6e;font-weight:700}.trace-status{color:#3d9a7e;text-align:right}
+    .overlay{position:fixed;inset:0;background:rgba(10,28,35,.45);z-index:30;opacity:0;pointer-events:none;transition:.22s}
+    .overlay.visible{opacity:1;pointer-events:auto}
+    .drawer{position:fixed;z-index:31;top:0;right:0;bottom:0;width:min(510px,100vw);background:#fff;transform:translateX(102%);transition:transform .24s;box-shadow:-9px 0 48px rgba(6,28,34,.19);display:flex;flex-direction:column}
+    .drawer.visible{transform:translateX(0)}
+    .drawer-head{padding:26px 27px 18px;display:flex;align-items:start;justify-content:space-between;gap:20px;border-bottom:1px solid #e8efed}
+    .drawer-head h2{font-size:18px;margin-bottom:0}.drawer-body{padding:25px 27px;overflow-y:auto;font-size:13px;line-height:1.95}
+    .drawer-body .original{background:#f6faf8;border-left:3px solid #19826b;border-radius:0 11px 11px 0;padding:16px;font-family:"KaiTi","STKaiti","Microsoft YaHei",serif;font-size:15px;line-height:2.1;margin-bottom:18px}
+    .metadata{display:grid;grid-template-columns:90px 1fr;gap:13px;font-size:12px;padding:13px 0;border-bottom:1px solid #edf2f0}.metadata span:first-child{color:#96a6a7}.metadata span:last-child{color:#345661}
+    .drawer-close{border:0;background:#f0f4f2;color:#53706d;border-radius:8px;width:32px;height:32px;font-size:19px}
+    .toast{position:fixed;right:25px;bottom:25px;background:#153f43;color:#fff;padding:13px 18px;border-radius:12px;font-size:12px;box-shadow:0 12px 32px #17363f40;z-index:60;opacity:0;transform:translateY(13px);transition:.18s;max-width:420px;pointer-events:none}
+    .toast.visible{opacity:1;transform:translateY(0)}
+    .tiny-footer{text-align:center;color:#a1afad;font-size:10px;padding:20px 0 0}
+    @media(max-width:1400px){.sidebar{width:185px;flex-basis:185px}.main-content{padding:27px 25px}.topbar{padding:0 25px}.tri-panel{grid-template-columns:minmax(230px,.9fr) minmax(310px,1.15fr) minmax(240px,.93fr)}.intro-stats{gap:5px}.intro-num+.intro-num{padding-left:10px}.result-body{padding:0 12px 12px}}
+    @media(max-width:1170px){.tri-panel{grid-template-columns:minmax(280px,1fr) minmax(350px,1.35fr)}.evidence-panel{grid-column:1/-1}.evidence-panel .evidence-top{padding-bottom:5px}.evidence-section{display:inline-block;width:33.33%;vertical-align:top}.under-grid{grid-template-columns:1fr 1fr}.intro{grid-template-columns:1fr .85fr}}
+    @media(max-width:880px){.sidebar{width:67px;flex-basis:67px;padding:23px 9px}.brand{padding:0 5px 31px}.brand>div:not(.mark),.nav-label,.nav-btn span:last-child,.sidebar-bottom{display:none}.nav-btn{justify-content:center;padding:13px 8px}.mark{width:38px;height:38px}.main-content{padding:23px 20px}.intro{grid-template-columns:1fr}.intro-stats{justify-content:flex-start;padding-top:5px}.intro-num{text-align:left}.tri-panel{grid-template-columns:1fr}.evidence-panel{grid-column:auto}.under-grid{grid-template-columns:1fr}.review-strip{flex-direction:column;align-items:stretch}.review-actions{justify-content:flex-start}.step-row{grid-template-columns:repeat(4,1fr)}}
+
+    .input-row,.runtime-actions,.input-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.field-label.compact{display:flex;align-items:center;gap:6px;font-size:12px}.field-label.compact input,.field-label.compact select{width:auto;min-width:90px;padding:7px 8px}.runtime-line{font-size:11px;color:#71808b;margin:0 0 10px}.helper-inline{font-size:11px;color:#71808b}.facts-editor{margin:12px 0;border-top:1px solid #e5e8e6;padding-top:10px}.facts-editor summary{cursor:pointer;color:#406d68;font-size:12px}.fact-row{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid #eef1ef;font-size:12px}.fact-row select{border:1px solid #ccd8d3;border-radius:6px;padding:3px 5px;background:#fff}.conflict-notice{font-size:11px;color:#9a5c43}.summary-box{white-space:pre-wrap;background:#f6f8f6;border-radius:8px;padding:12px;font-size:11px;color:#53636a;min-height:44px}.review-tools{display:flex;gap:8px;margin-left:auto}.qa-panel{margin-top:16px;padding:18px}.qa-answer{font-size:13px;line-height:1.7}.qa-answer .warning-bar{margin-top:12px}.runtime-panel{padding:18px}.runtime-actions select{border:1px solid #ccd8d3;border-radius:7px;padding:8px;background:#fff;font-size:12px}.review-strip{display:flex;align-items:center;gap:16px;flex-wrap:wrap}.review-strip>div:first-child{flex:1;min-width:220px}.review-strip .review-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+    @media(max-width:600px){.sidebar{width:53px;flex-basis:53px;padding:18px 5px}.mark{width:34px;height:34px}.nav-btn{padding:12px 5px}.topbar{height:60px;padding:0 16px}.topright{gap:8px}.user-name,.user-role,.top-separator{display:none}.main-content{padding:20px 13px}.page-title{align-items:flex-start}.page-title h1{font-size:22px}.intro{padding:20px}.intro h2{font-size:17px}.intro-num strong{font-size:22px}.intro-num span{white-space:normal}.panel-head{padding:18px 17px 12px}.clinical-body{padding:5px 17px 18px}.evidence-section{display:block;width:100%}.k-results{grid-template-columns:1fr}.k-search{flex-direction:column}.trace{grid-template-columns:90px 1fr 48px;padding:10px}.page-title .badge{display:none}}
+  .source-item{width:100%;text-align:left;background:#fff;font-family:inherit;cursor:pointer}.k-card{text-align:left;font-family:inherit;cursor:pointer}.audit-grid{display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-top:15px}.audit-box{padding:15px}.audit-box summary{font-size:12px;color:#426b61;cursor:pointer}.audit-box pre,.drawer pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;line-height:1.7;max-height:420px;overflow:auto}.num-tag{overflow-wrap:anywhere;white-space:normal}.runtime-panel{grid-column:1/-1}.runtime-panel .panel-head{padding:0 0 12px}.step-row{grid-template-columns:repeat(5,1fr)}@media(max-width:880px){.audit-grid{grid-template-columns:1fr}.step-row{grid-template-columns:repeat(3,1fr)}}
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="mark"><strong>六</strong></div><div><div class="brand-title">六经辨证</div><div class="brand-sub">CLINICAL AI AGENT</div></div></div>
+    <div class="nav-label">WORKSPACE</div>
+    <nav class="nav" aria-label="主要导航">
+      <button class="nav-btn active" data-nav="workbench" type="button"><span class="nav-icon">▤</span><span>临床辨证工作台</span></button>
+      <button class="nav-btn" data-nav="knowledge" type="button"><span class="nav-icon">▧</span><span>经典知识速查</span></button>
+      <button class="nav-btn" data-nav="trace" type="button"><span class="nav-icon">◫</span><span>Agent 执行轨迹</span></button>
+      <button class="nav-btn" data-nav="history" type="button"><span class="nav-icon">◷</span><span>会诊历史</span></button>
+    </nav>
+    <div class="sidebar-bottom"><div class="system-status"><span class="led"></span><span id="sideStatus">界面服务已就绪</span></div><div class="side-foot">Reasoning Protocol V1.0<br>Knowledge Base V1.2<br>Console Preview v1.0</div></div>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <div class="crumb"><span>Clinical Intelligence</span><span>／</span><strong id="crumbPage">临床辨证工作台</strong></div>
+      <div class="topright"><span class="badge warning" id="modeBadge">正在连接会诊服务…</span><button type="button" id="refreshButton" class="top-icon" title="刷新当前页面数据">↻</button><div class="top-separator"></div><div class="avatar">医</div><div><div class="user-name">临床医生</div><div class="user-role">Doctor Workspace</div></div></div>
+    </header>
+    <main class="main-content">
+      <section class="view active" data-view="workbench">
+        <div class="page-title"><div><div class="eyebrow">Clinical Reasoning Workspace</div><h1>临床辨证工作台</h1><p class="subtitle">循证分析 · 六经辨证 · 人工审核，让每一次判断都有迹可循</p></div><span class="badge">◇ Human in the Loop</span></div>
+        <div class="intro">
+          <div><div class="hero-kicker">SIX CHANNEL INTELLIGENCE</div><h2>观其脉证，知犯何逆，随证治之。</h2><p>从脉证信息到六经候选，从经典原文到鉴别证据。以结构化状态呈现分析过程，最终决定始终由医生作出。</p></div>
+          <div class="intro-stats"><div class="intro-num"><strong>398</strong><span>经典条文</span></div><div class="intro-num"><strong>53</strong><span>鉴别规则</span></div><div class="intro-num"><strong>Top 3</strong><span>候选路径</span></div></div>
+        </div>
+        <div class="tri-panel">
+          <section class="panel clinical-panel">
+            <div class="panel-head"><div><h3>脉证信息录入</h3><span class="section-sub">Clinical Evidence Input</span></div><div class="num-tag">01 / INPUT</div></div>
+            <div class="clinical-body">
+              <label for="clinicalText" class="field-label">四诊信息 <span>医生录入 · 文本</span></label>
+              <div class="runtime-line" id="runtimeInfo">正在读取真实运行容器…</div><div class="input-row"><label class="field-label compact" for="topK">展示候选 <select id="topK"><option value="3" selected>Top 3</option><option value="1">Top 1</option><option value="5">Top 5</option></select></label><label class="field-label compact" for="patientRef">脱敏引用 <input id="patientRef" placeholder="可选" maxlength="80"></label></div><textarea id="clinicalText" placeholder="请输入患者主诉、症状、寒热汗出、二便、舌象、脉象及病程信息。&#10;&#10;可点击下方填入合成病例，再由真实后端运行完整工作流。"></textarea>
+              <div class="input-actions"><button id="parseBtn" type="button" class="outline-btn">解析并核对事实</button><span class="helper-inline">解析只提取结构化事实，不生成结论</span></div><details id="factsEditor" class="facts-editor"><summary>结构化事实核对 <span id="unknownCount">未知 0 项</span></summary><div id="factRows"></div><div id="unknownChips" class="chips"></div><p id="conflictNotice" class="conflict-notice"></p><button id="saveFacts" type="button" class="outline-btn" disabled>保存事实修订</button></details><div class="sample-box"><div class="sample-head"><strong>◈ 合成示例输入</strong><button class="text-link" id="fillSample" type="button">填入示例 →</button></div><p>太阳证鉴别示例：恶寒发热、无汗、头项痛、脉浮紧。合成输入仅用于功能展示，不提供临床判断。</p></div>
+              <div class="divider"></div>
+              <div class="mini-title">结构化临床证据 <span id="findingsCount">待提取</span></div>
+              <div class="chips" id="clinicalChips"><span class="chip unknown">等待建立会话</span></div>
+              <div class="bottom-actions"><button type="button" id="startBtn" class="primary-btn full">✦ 启动真实辨证分析 <span style="float:right">→</span></button><p class="helper">不自动生成处方或用药剂量 · 仅供研发调试</p></div>
+            </div>
+          </section>
+          <section class="panel results-panel">
+            <div class="panel-head result-head"><div><h3>Top-K 辨证候选</h3><span class="section-sub">Candidate Reasoning Paths</span></div><span class="badge" id="resultState">尚未开始</span></div>
+            <div class="panel-note" id="resultNotice">排序分由后端返回，用于候选比较，不表示诊断概率。</div>
+            <div class="result-body" id="results"><div class="empty-state"><div class="empty-ring">六</div><strong>辨证结果待生成</strong><p>左侧输入四诊信息并启动流程，即可查看 Top-K 展示、证据与鉴别卡片。</p></div></div>
+          </section>
+          <section class="panel evidence-panel">
+            <div class="panel-head"><div><h3>证据与鉴别分析</h3><span class="section-sub">Evidence & Differential</span></div><div class="num-tag">03 / TRACE</div></div>
+            <div class="evidence-top"><span class="chip channel" id="selectedSyndrome">尚未选择候选</span><span class="chip unknown">证据来源追溯</span></div>
+            <div class="evidence-section"><div class="evidence-section-heading">✓ 支持证据 <span class="small-count" id="supportCount">0项</span></div><div class="evidence-list" id="supportList"><span class="small-empty">完成分析后显示</span></div></div>
+            <div class="evidence-section"><div class="evidence-section-heading">! 反证 / 冲突 <span class="small-count" id="conflictCount">0项</span></div><div class="evidence-list" id="conflictList"><span class="small-empty">完成分析后显示</span></div></div>
+            <div class="evidence-section"><div class="evidence-section-heading">? 缺失关键证据 <span class="small-count" id="missingCount">0项</span></div><div class="evidence-list" id="missingList"><span class="small-empty">完成分析后显示</span></div></div>
+            <div class="evidence-section" style="flex:1"><div class="evidence-section-heading">▤ 《伤寒论》原文证据 <span class="small-count">点击查看全文 →</span></div><div id="sourceList"><p class="small-empty">经典条文将在这里展示，可以展开原文与审核信息。</p></div><button class="text-link" id="openDiff" type="button" style="margin-top:9px">查看原始鉴别规则 ↗</button></div>
+          </section>
+        </div>
+        <div class="audit-grid"><details class="panel audit-box"><summary>当前路径来源适用性与排序审计</summary><pre id="pathAudit">尚无路径审计</pre></details><details class="panel audit-box"><summary>后置历史医案参考</summary><pre id="similarCases">尚无医案参考</pre></details></div><div class="under-grid"><section class="panel runtime-panel"><div class="panel-head"><div><h3>当前会诊</h3><span class="section-sub">Session & Review Controls</span></div><div class="num-tag" id="sessionInfo">尚未创建</div></div><div class="runtime-actions"><button id="reviewReady" class="outline-btn" disabled>转交医生审核</button><button id="cancelBtn" class="outline-btn" disabled>取消会诊</button><select id="rerunStage"><option value="build_evidence">从脉证整理重算</option><option value="differential">从鉴别反证重算</option><option value="topk">从 Top-K 重算</option></select><button id="rerunBtn" class="outline-btn" disabled>重算阶段</button><button id="replayBtn" class="text-link" disabled>公开阶段回放 ↗</button></div><pre id="eightSummary" class="summary-box">八纲倾向将在运行完成后展示</pre></section>
+          <section class="panel"><div class="pipeline-head"><h3>Agent 执行流程</h3><span id="pipelineState">等待启动</span></div><div class="pipeline"><div class="step-row" id="stageRow"></div><p class="step-detail" id="stageDetail">系统会通过 SSE 分阶段展示状态；这里只展示可审计事件，不展示模型隐藏思维链。</p></div></section>
+          <section class="panel"><div class="panel-head"><div><h3>证据缺口与补充信息</h3><span class="section-sub">Evidence Gap · Doctor Input</span></div><div class="num-tag">FOLLOW-UP</div></div><div class="supplement"><div class="question-box" id="suggestedQuestion">完成辨证后，显示需要医生重点核对的关键脉证和鉴别信息。</div><textarea id="extraEvidence" placeholder="医生可以在此补充脉象、舌象、寒热、汗出、二便等信息…"></textarea><div class="supplement-actions"><button id="addEvidence" type="button" class="outline-btn" disabled>＋ 补充到当前会话</button></div></div></section>
+        </div>
+        <div class="panel review-strip"><div class="review-tools"><button class="outline-btn" id="modifyBtn" disabled>修改后采用</button><button class="outline-btn" id="noteBtn" disabled>记录备注</button></div><div><div class="review-title">Doctor Review · 最终由医生确认</div><div class="review-desc" id="reviewState">选择候选后记录医生审核；存储方式以运行状态为准。</div></div><div class="review-actions"><input id="reviewNote" placeholder="审核备注（可选）" aria-label="审核备注"><button class="outline-btn" id="rejectBtn" disabled type="button">驳回候选</button><button class="primary-btn" id="acceptBtn" disabled type="button">✓ 确认当前候选</button></div></div>
+        <div class="warning-bar">⚑ <strong>临床边界：</strong><span id="disclaimer">研究与工程验证版本，最终由医生审核；模型质量与临床适用性需独立验证。</span></div>
+      </section>
+      <section class="view" data-view="history"><div class="page-title"><div><div class="eyebrow">Consultation Archive</div><h1>会诊历史</h1><p class="subtitle">从业务存储读取最近会诊，恢复权威快照和公开阶段。</p></div><button id="refreshHistory" class="outline-btn" type="button">刷新历史</button></div><p id="historyStatus" class="subtitle">等待读取…</p><div id="historyList" class="k-results"></div></section>
+      <section class="view" data-view="knowledge">
+        <div class="page-title"><div><div class="eyebrow">Knowledge Center</div><h1>经典知识速查</h1><p class="subtitle">检索项目附带的《伤寒论》V1.2 条文；直接展示原文，不经大模型改写</p></div><span class="badge">398 个可追溯条文</span></div>
+        <div class="intro"><div><div class="hero-kicker">KNOWLEDGE REFERENCE LIBRARY</div><h2>方证有据 · 原文可考</h2><p>输入条文号、方剂名称或原文关键词；通过现有 KnowledgeService 检索，保持来源版本与审核信息。</p></div><div class="intro-stats"><div class="intro-num"><strong>V1.2</strong><span>知识库版本</span></div><div class="intro-num"><strong>398</strong><span>经典条文</span></div></div></div>
+        <div class="k-search"><input id="knowledgeQuery" placeholder="试试：35 / 麻黄汤 / 无汗 / 往来寒热" value="麻黄汤"><button id="knowledgeSearch" type="button" class="primary-btn">搜索经典条文 →</button></div>
+        <p class="subtitle" id="knowledgeStatus" style="margin-bottom:15px">等待搜索…</p><div id="knowledgeResults" class="k-results"></div><section class="panel qa-panel"><div class="panel-head"><div><h3>知识问答</h3><span class="section-sub">Extractive Knowledge QA</span></div></div><div class="k-search"><input id="qaQuery" placeholder="围绕条文和方证提问"><button id="askBtn" type="button" class="primary-btn">基于来源回答 →</button></div><div id="qaAnswer" class="qa-answer"><p class="small-empty">答案只展示后端返回的来源摘录。</p></div></section>
+      </section>
+      <section class="view" data-view="trace">
+        <div class="page-title"><div><div class="eyebrow">Execution Observatory</div><h1>Agent 执行轨迹</h1><p class="subtitle">可审计执行事件 · 会话标识 · 阶段状态，无模型隐藏 CoT</p></div><span class="badge">SSE Event Stream</span></div>
+        <div class="intro"><div><div class="hero-kicker">TRACE / OBSERVABILITY</div><h2>每个步骤都可被观察与复查</h2><p>前端直接订阅 LangGraph 服务发送的 SSE 事件，并通过快照接口还原状态；页面展示公开阶段事件，而非模型隐藏推理链。</p></div><div class="intro-stats"><div class="intro-num"><strong id="traceEventCount">0</strong><span>已接收事件</span></div><div class="intro-num"><strong id="traceSessionCount">0</strong><span>当前会话</span></div></div></div>
+        <div class="trace-shell"><div class="trace-head"><strong>最近执行事件</strong><span class="badge" id="traceMode">真实 SSE</span></div><div id="traces" class="traces"><p class="small-empty">运行会诊后显示真实公开阶段事件。</p></div></div>
+      </section>
+      <footer class="tiny-footer">SIX CHANNEL AI · KNOWLEDGE V1.2 · REASONING PROTOCOL V1.0 · HUMAN REVIEW REQUIRED</footer>
+    </main>
+  </div>
+</div>
+<div class="overlay" id="overlay"></div>
+<aside class="drawer" id="drawer" aria-label="证据详情"><div class="drawer-head"><div><div class="eyebrow" id="drawerEyebrow">SOURCE EVIDENCE</div><h2 id="drawerTitle">经典证据</h2></div><button class="drawer-close" id="closeDrawer" type="button" aria-label="关闭证据详情">×</button></div><div id="drawerBody" class="drawer-body"></div></aside>
+<div class="toast" role="status" id="toast"></div>
+<script src="/console-static/labels.js"></script>
+<script src="/console-static/console.js"></script>
+</body>
+</html>
+

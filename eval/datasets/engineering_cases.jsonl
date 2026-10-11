@@ -1,0 +1,6 @@
+{"case_id":"E01","text":"发热，无汗，恶寒，脉浮紧","expected_current":{"fever":"positive","sweating":"negative","chills":"positive","pulse_floating":"positive","pulse_tight":"positive"},"expected_unknown":["tongue","pulse_relaxed","pulse_weak"],"retrieval":[{"kind":"classic","query":"第1条","clause_id":"1","relevant_ids":["1.2:clause_1"]}]}
+{"case_id":"E02","text":"无发热，不渴","expected_current":{"fever":"negative","thirst":"negative"},"expected_unknown":["sweating","tongue","pulse"]}
+{"case_id":"E03","text":"口渴不详","expected_current":{},"expected_unknown":["thirst","tongue","pulse"]}
+{"case_id":"E04","text":"舌脉未提供","expected_current":{},"expected_unknown":["tongue","pulse","pulse_floating","tongue_red"]}
+{"case_id":"E05","text":"昨日发热，今日无发热","expected_current":{"fever":"negative"},"expected_unknown":["tongue","pulse"]}
+{"case_id":"E06","text":"汗出，无汗","expected_current":{},"expected_unknown":["tongue","pulse"],"conflicted_keys":["sweating"]}
