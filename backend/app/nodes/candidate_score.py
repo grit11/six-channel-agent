@@ -122,17 +122,35 @@ def score_path(
             description = raw_dimensions.get(dimension.dimension)
             if not isinstance(description, str):
                 continue
+            # 鉴别得分须完整绑定当前双方；单方说明和双方共同支持只能作背景，
+            # 不能凭一方症状命中制造区分性分数。
+            bound = [source_candidate_label(name, labels) for name in result.candidate_ids]
+            original_values = candidate_source_values(
+                description, labels, dimension=dimension.dimension
+            )
             if (
-                candidate_source_values(description, labels, dimension=dimension.dimension).get(
-                    label or ""
+                len(bound) != 2
+                or None in bound
+                or len(set(bound)) != 2
+                or any(candidate not in original_values for candidate in bound)
+                or any(
+                    dimension.candidate_values.get(candidate or "")
+                    != original_values.get(candidate or "")
+                    for candidate in bound
                 )
-                != condition
             ):
                 continue
+            statuses = {
+                candidate: assess_source_condition(
+                    original_values[candidate], clinical, dimension=dimension.dimension
+                ).status
+                for candidate in bound
+                if candidate is not None
+            }
             status = assess_source_condition(
                 condition, clinical, dimension=dimension.dimension
             ).status
-            if status == "supports":
+            if status == "supports" and list(statuses.values()).count("supports") == 1:
                 diff_support[(dimension.source_rule_id, condition)] = dimension.discriminator_weight
             elif (
                 status == "contradicts" and dimension.discriminator_weight >= policy.high_threshold

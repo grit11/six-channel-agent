@@ -162,7 +162,8 @@ class Settings(BaseSettings):
         description="五类运行时主库目录",
     )
     knowledge_base_version: str = Field(default="1.2", description="knowledge_base_version 配置值")
-    protocol_version: str = Field(default="1.0", description="protocol_version 配置值")
+    formula_branch_recall_top_n: int = Field(default=12, ge=5, le=30)
+    protocol_version: str = Field(default="1.2-six-stage", description="protocol_version 配置值")
     scoring_config_version: str = Field(default="1.0", description="scoring_config_version 配置值")
     scoring_policy: ScoringPolicy = Field(
         default_factory=ScoringPolicy, description="RP-13 七因子和反证惩罚配置，环境变量为 JSON"

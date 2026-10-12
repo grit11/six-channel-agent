@@ -38,7 +38,6 @@ class ParserLLM:
                         "key": "sweating",
                         "polarity": "negative",
                         "value": False,
-                        "source": "doctor_input",
                         "source_text": "无汗",
                     }
                 ]
@@ -70,7 +69,7 @@ async def test_graph_uses_injected_parser_but_preserves_doctor_snapshot() -> Non
     second = await service.analyze_evidence(edited)
     assert model.calls == 1
     assert second.clinical_evidence == edited
-    assert second.completed_stages[-1] == "similar_cases"
+    assert second.completed_stages[-1] == "evidence_topk"
 
 
 def test_parse_api_uses_model_and_reports_implemented_prompt(tmp_path: Path) -> None:
@@ -92,9 +91,9 @@ def test_parse_api_uses_model_and_reports_implemented_prompt(tmp_path: Path) -> 
     ):
         result = client.post("/api/v1/clinical/parse", json={"text": "无汗"})
         assert result.status_code == 200
-        assert result.json()["parser_version"] == "llm-clinical/v1.0"
+        assert result.json()["parser_version"] == "llm-clinical/v1.2"
         assert (
-            client.get("/api/v1/system/versions").json()["prompt_version"] == "clinical-parser/v1.0"
+            client.get("/api/v1/system/versions").json()["prompt_version"] == "clinical-parser/v1.2"
         )
         invalid = client.post("/api/v1/clinical/parse", json={"text": "发热"})
         assert invalid.status_code == 503

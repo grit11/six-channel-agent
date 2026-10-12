@@ -14,10 +14,14 @@ from backend.app.nodes.clinical_parser import (
 )
 from backend.app.nodes.source_conditions import assess_source_condition
 from backend.app.schemas.clinical import ClinicalEvidence
+from backend.app.schemas.evidence import Evidence
 from backend.app.schemas.reasoning import (
     DifferentialDimension,
     DifferentialResult,
     FormulaCandidate,
+    PathComparison,
+    PathKeyDifference,
+    ReasoningPath,
 )
 
 
@@ -45,17 +49,16 @@ async def compare_formula_candidates(
 ) -> list[DifferentialResult]:
     """只应用包含当前双方候选的规则，分别返回支持、反证和无法判定的维度。"""
     results: list[DifferentialResult] = []
-    unique = list({item.formula_name: item for item in formulas[:8]}.values())
-    resolved = await knowledge.resolve_differential_candidates(
-        [item.formula_name for item in unique]
-    )
+    # S3 控制候选池上限；S4 仅去重，不能再次截断来源充分的后排候选。
+    unique = list({item.formula_name: item for item in formulas}.values())
+    rules = await knowledge.differential_rules_for_pool([item.formula_name for item in unique])
     for first, second in combinations(unique, 2):
-        labels = [resolved[first.formula_name], resolved[second.formula_name]]
-        if labels[0] == labels[1]:
-            continue
-        rules = await knowledge.search_differential(labels, query=" vs ".join(labels), top_k=5)
         for rule in rules:
-            bound = [source_candidate_label(label, rule.candidates) for label in labels]
+            # 按每条规则局部绑定，跨规则的同名/括注歧义不影响当前明确来源。
+            bound = [
+                source_candidate_label(item.formula_name, rule.candidates)
+                for item in (first, second)
+            ]
             if any(label is None for label in bound) or len(set(bound)) < 2:
                 continue
             rule_labels = [label for label in bound if label is not None]
@@ -123,3 +126,152 @@ async def compare_formula_candidates(
                 )
             )
     return results
+
+
+def _conclusion(
+    first: str, second: str
+) -> Literal["favors_current", "favors_next", "shared", "unresolved", "both_contradicted"]:
+    """按三值状态给出公开比较结论，单边 Unknown 不等同反证。"""
+    if first == "supports" and second == "contradicts":
+        return "favors_current"
+    if first == "contradicts" and second == "supports":
+        return "favors_next"
+    if first == second == "supports":
+        return "shared"
+    if first == second == "contradicts":
+        return "both_contradicted"
+    return "unresolved"
+
+
+async def compare_next_path(
+    path: ReasoningPath,
+    following: ReasoningPath,
+    clinical: ClinicalEvidence,
+    differential: list[DifferentialResult],
+    knowledge: KnowledgeService,
+    *,
+    verified_only: bool = False,
+) -> tuple[PathComparison, list[Evidence]]:
+    """比较完整排序中的次选，重新读来源，不信任上游组级支持摘要或观察文本。"""
+    comparison = PathComparison(
+        next_path_id=following.path_id,
+        next_syndrome_name=following.syndrome_name,
+        next_formula_pattern=following.formula_pattern,
+        status="no_source_rule",
+        summary="当前候选对没有完整可归属的来源鉴别；分差仅为工程排序差异。",
+    )
+    if not path.formula_pattern or not following.formula_pattern:
+        comparison.status, comparison.summary = (
+            "no_formula",
+            "至少一条路径没有方证，当前未建立来源支持的候选对差异。",
+        )
+        return comparison, []
+    if path.formula_pattern == following.formula_pattern:
+        comparison.status, comparison.summary = (
+            "same_formula",
+            "两条路径引用同一方证；六经或关系差异须另行核对，不能套用方证鉴别。",
+        )
+        return comparison, []
+    if verified_only:
+        # S4 的条件核验已通过 KnowledgeService；S5 只消费，不再取同一条规则。
+        for result in differential:
+            if {path.formula_pattern, following.formula_pattern} != set(result.candidate_ids):
+                continue
+            for verified_dimension in result.dimensions:
+                labels = list(verified_dimension.candidate_values)
+                first = source_candidate_label(path.formula_pattern, labels)
+                second = source_candidate_label(following.formula_pattern, labels)
+                left = verified_dimension.condition_assessments.get(first or "")
+                right = verified_dimension.condition_assessments.get(second or "")
+                if (
+                    not first
+                    or not second
+                    or first == second
+                    or left is None
+                    or right is None
+                    or not all(
+                        item.kind == "symptom" and item.alternatives for item in (left, right)
+                    )
+                ):
+                    continue
+                comparison.differences.append(
+                    PathKeyDifference(
+                        dimension=verified_dimension.dimension,
+                        evidence_id=knowledge.version + ":" + verified_dimension.source_rule_id,
+                        current_requirement=verified_dimension.candidate_values[first],
+                        next_requirement=verified_dimension.candidate_values[second],
+                        current_status=left.status,
+                        next_status=right.status,
+                        finding_keys=sorted(
+                            {
+                                key
+                                for item in (left, right)
+                                for branch in item.alternatives
+                                for key in branch
+                            }
+                        ),
+                        conclusion=_conclusion(left.status, right.status),
+                    )
+                )
+        if comparison.differences:
+            comparison.status = "compared"
+            comparison.summary = "来源鉴别维度已在 S4 核验；Unknown 保留待医生确认。"
+        return comparison, []
+    rule_ids = {
+        dimension.source_rule_id
+        for result in differential
+        if {path.formula_pattern, following.formula_pattern}.issubset(result.candidate_ids)
+        for dimension in result.dimensions
+    }
+    sources: list[Evidence] = []
+    for rule_id in sorted(rule_ids):
+        rule = await knowledge.get_differential_by_id(rule_id)
+        if rule is None:
+            continue
+        first, second = (
+            source_candidate_label(name, rule.candidates)
+            for name in (path.formula_pattern, following.formula_pattern)
+        )
+        if first is None or second is None or first == second:
+            continue
+        for dimension, description in rule.key_dimensions.items():
+            values = candidate_source_values(description, rule.candidates, dimension=dimension)
+            if first not in values or second not in values:
+                continue
+            left = assess_source_condition(values[first], clinical, dimension=dimension)
+            right = assess_source_condition(values[second], clinical, dimension=dimension)
+            # 治疗和病机说明不转成关键症状差异；保留在全量 DifferentialPanel。
+            if not all(item.kind == "symptom" and item.alternatives for item in (left, right)):
+                continue
+            comparison.differences.append(
+                PathKeyDifference(
+                    dimension=dimension,
+                    evidence_id=rule.evidence_id,
+                    current_requirement=values[first],
+                    next_requirement=values[second],
+                    current_status=left.status,
+                    next_status=right.status,
+                    finding_keys=sorted(
+                        {
+                            key
+                            for item in (left, right)
+                            for branch in item.alternatives
+                            for key in branch
+                        }
+                    ),
+                    conclusion=_conclusion(left.status, right.status),
+                )
+            )
+        if any(item.evidence_id == rule.evidence_id for item in comparison.differences):
+            sources.append(rule)
+    if comparison.differences:
+        comparison.status = "compared"
+        favored = [
+            item.dimension for item in comparison.differences if item.conclusion == "favors_current"
+        ]
+        comparison.summary = (
+            "当前已知条件更支持本路径的维度：" + "、".join(favored)
+            if favored
+            else "当前来源维度尚未形成明确支持本路径的完整差异；详见双方三值核对。"
+        )
+    return comparison, sources

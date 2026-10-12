@@ -11,6 +11,8 @@ import re
 from pathlib import Path
 from typing import Literal
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from backend.app.core.exceptions import ProviderUnavailableError
 from backend.app.core.ports import StructuredLLM
 from backend.app.schemas.clinical import (
@@ -125,11 +127,12 @@ _PULSE_KEYS = {
 _TOKEN_PATTERN = re.compile(
     "脉["
     + "".join(_PULSE_KEYS)
+    + "而"
     + "]+|"
     + "|".join(re.escape(term) for term in sorted(_TERMS, key=len, reverse=True))
 )
 _NEGATION = re.compile(r"(?:否认|未见|没有|不是|未|无|不)\s*$")
-_UNCERTAIN = re.compile(r"(?:是否|有无|不详|不确定|可能|疑似)\s*$")
+_UNCERTAIN = re.compile(r"(?:是否|有无|未问及|未询问|不详|不确定|可能|疑似)\s*$")
 _UNCERTAIN_SUFFIX = re.compile(r"\s*(?:不详|不确定|未知|未问|待查)")
 _TIME_PATTERN = re.compile(
     r"昨日|昨天|今日|今天|当前|现在|目前|既往|曾经|治疗前|治疗后|服药前|服药后|"
@@ -172,13 +175,13 @@ def _extract(text: str, source: FindingSource) -> list[Finding]:
             end = suffix.end() if suffix else match.end()
             original = clause[start:end]
             keys = (
-                [_PULSE_KEYS[char] for char in term[1:]]
+                [_PULSE_KEYS[char] for char in term[1:] if char in _PULSE_KEYS]
                 if term.startswith("脉")
                 else [_TERMS[term]]
             )
             # 否认一个复合脉象不等于分别否认每个组成，留给模型/医生规范化。
             if polarity == "negative" and len(keys) > 1:
-                keys = ["pulse_composite:" + term]
+                keys = ["pulse_composite:" + "_".join(keys)]
             for key in dict.fromkeys(keys):
                 findings.append(
                     Finding(
@@ -340,6 +343,55 @@ def _validate_model_facts(
     return ClinicalEvidence.model_validate(evidence.model_dump())
 
 
+class CompactFinding(BaseModel):
+    """模型抽取的最小事实；来源身份与区域由服务端补齐，不接受诊断字段。"""
+
+    model_config = ConfigDict(extra="forbid")
+    key: str = Field(min_length=1)
+    polarity: Polarity
+    source_text: str = Field(min_length=1)
+    time_scope: str | None = None
+    value: str | float | bool | None = None
+
+
+class CompactClinicalExtraction(BaseModel):
+    """只保留原文明确事实，未提及项由临床 DTO 的三值语义处理。"""
+
+    model_config = ConfigDict(extra="forbid")
+    chief_complaint: str | None = None
+    onset: str | None = None
+    course: str | None = None
+    findings: list[CompactFinding] = Field(default_factory=list, max_length=200)
+
+
+def compact_to_clinical(
+    compact: CompactClinicalExtraction, text: str, source: FindingSource
+) -> ClinicalEvidence:
+    """扩展紧凑事实后执行同一来源校验；Unknown 不补值，不接受无原文事实。"""
+    findings: list[Finding] = []
+    for item in compact.findings:
+        if item.source_text not in text or (item.time_scope and item.time_scope not in text):
+            raise ValueError("紧凑事实缺少连续原文来源")
+        if item.polarity == "unknown" and item.value is not None:
+            raise ValueError("Unknown 事实值必须为空")
+        value = item.value
+        if value is None and item.polarity != "unknown":
+            value = item.polarity == "positive"
+        findings.append(
+            Finding(
+                **item.model_dump(exclude={"value"}),
+                value=value,
+                source=source,
+                certainty=0.0 if item.polarity == "unknown" else 1.0,
+            )
+        )
+    clinical = ClinicalEvidence(**compact.model_dump(exclude={"findings"}), findings=findings)
+    # 区域由已核验事实投影，模型不能在另一字段隐藏补全事实。
+    clinical.pulse = {item.key: item.value for item in findings if item.key.startswith("pulse_")}
+    clinical.sweating = {item.key: item.value for item in findings if item.key == "sweating"}
+    return _validate_model_facts(clinical, text, source)
+
+
 async def parse_clinical_with_llm(
     text: str, llm: StructuredLLM, *, source: FindingSource = "doctor_input"
 ) -> ClinicalEvidence:
@@ -353,13 +405,25 @@ async def parse_clinical_with_llm(
             {
                 "role": "user",
                 "content": json.dumps(
-                    {"source": source, "clinical_text": text}, ensure_ascii=False
+                    {
+                        "source": source,
+                        "clinical_text": text,
+                        "lexical_constraints": [
+                            item.model_dump(
+                                mode="json",
+                                include={"key", "polarity", "source_text", "time_scope"},
+                            )
+                            for item in _extract(text, source)
+                        ],
+                        "canonical_keys": list(_UNKNOWN_KEYS),
+                    },
+                    ensure_ascii=False,
                 ),
             },
         ],
-        ClinicalEvidence,
+        CompactClinicalExtraction,
     )
     try:
-        return _validate_model_facts(evidence, text, source)
+        return compact_to_clinical(evidence, text, source)
     except ValueError as exc:
         raise ProviderUnavailableError("Clinical Parser 模型输出未通过事实来源校验") from exc

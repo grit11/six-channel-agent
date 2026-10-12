@@ -57,7 +57,7 @@ async def test_business_interrupt_survives_saver_restart_and_review_loop(tmp_pat
         )
         config: RunnableConfig = {"configurable": {"thread_id": initial.thread_id}}
         state = await workflow.graph.aget_state(config)
-        assert state.next == ("doctor_wait",)
+        assert state.next == ("doctor_review",)
         assert state.tasks[0].interrupts[0].value["phase"] == "supplement"
         assert initial.status == "needs_evidence"
         assert initial.reasoning is not None
@@ -115,7 +115,7 @@ async def test_business_interrupt_survives_saver_restart_and_review_loop(tmp_pat
         state = await resumed.graph.aget_state(config)
         assert state.values["clinical_evidence"]["course"] == "医生已核对病程"
         assert state.values["clinical_evidence"]["treatment_events"][0]["event_id"] == "history1"
-        assert state.next == ("doctor_wait",) and state.values["result"] is None
+        assert state.next == ("doctor_review",) and state.values["result"] is None
         assert state.tasks[0].interrupts
         result = await service.rerun(
             initial.consultation_id, ConsultationRerunRequest(expected_turn=saved.turn)

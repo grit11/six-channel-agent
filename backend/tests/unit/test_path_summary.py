@@ -5,10 +5,9 @@ import pytest
 from backend.app.core.config import Settings
 from backend.app.knowledge.service import KnowledgeService
 from backend.app.nodes.clinical_parser import parse_clinical_text
-from backend.app.nodes.differential_reasoner import compare_formula_candidates
+from backend.app.nodes.differential_reasoner import compare_formula_candidates, compare_next_path
 from backend.app.nodes.eight_principles import analyze_eight_principles
 from backend.app.nodes.path_summary import (
-    compare_next_path,
     summarize_completeness,
     summarize_treatment,
 )

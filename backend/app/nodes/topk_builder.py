@@ -12,8 +12,8 @@ from backend.app.core.exceptions import KnowledgeRetrievalError
 from backend.app.knowledge.differential import source_candidate_label
 from backend.app.knowledge.service import KnowledgeService
 from backend.app.nodes.candidate_score import score_path
+from backend.app.nodes.differential_reasoner import compare_next_path
 from backend.app.nodes.path_summary import (
-    compare_next_path,
     summarize_completeness,
     summarize_treatment,
 )
@@ -185,7 +185,12 @@ async def _make_path(
             ]
         ),
         classic_evidence=_unique(
-            [value for item in group for value in item.classic_evidence_ids]
+            (
+                []
+                if formula and formula.branch_clause_evidence_ids
+                else [value for item in group for value in item.classic_evidence_ids]
+            )
+            + (formula.branch_clause_evidence_ids if formula else [])
             + [
                 item.evidence_id
                 for item in relation_sources
@@ -221,6 +226,7 @@ async def build_topk_paths(
     scoring_policy: ScoringPolicy | None = None,
     excluded_paths: list[ReasoningPath] | None = None,
     evidence_gaps: list[EvidenceGap] | None = None,
+    verified_comparisons: bool = False,
 ) -> tuple[list[ReasoningPath], list[Evidence]]:
     """生成最多 K 条可溯源路径与精确来源目录；证据不足不凑满候选，不创建虚构 ID。"""
     if not 1 <= top_k <= 5 or not 0 <= channel_weight <= 1:
@@ -349,6 +355,7 @@ async def build_topk_paths(
                 clinical,
                 differential,
                 knowledge,
+                verified_only=verified_comparisons,
             )
             comparison_sources.extend(sources)
     # 同一来源在两条路径中可分别支持或反驳，因此用途只存路径，不能改共享 catalog。

@@ -115,6 +115,8 @@ async function main() {
     await page.locator('[data-fact-index]').first().waitFor();
     await page.locator('#startBtn').click();
     await page.locator('.result-card').first().waitFor({timeout:60000});
+    assert.equal(await page.locator('#stageRow .step').count(),6);
+    assert.equal(await page.locator('#stageRow .step').last().locator('.step-dot').innerText(),'6');
     const id=new URL(page.url()).searchParams.get('consultation');assert.ok(id);
     await page.locator('.source-item').first().click();
     assert.ok(await page.locator('#drawerBody').innerText());await page.locator('#closeDrawer').click();
@@ -138,13 +140,16 @@ async function main() {
     assert.equal(reviewed.consultation_id,id);
     assert.equal(reviewed.status,'completed');
     assert.equal(reviewed.doctor_review.action,'accept');
+    await page.waitForFunction(()=>document.querySelector('#stageRow .step:last-child').classList.contains('finished'));
+    assert.deepEqual(reviewed.reasoning.completed_stages, ['clinical_parser','six_channel_screen','formula_branch_retrieval','differential_verification','evidence_topk']);
     // 全量验收将截图关联到本次报告，单独执行时写入统一测试资料目录。
     const artifacts=path.resolve(process.env.CONSOLE_TEST_ARTIFACTS || path.join(root,'..','Console版本测试文件'));
     const output=path.resolve(process.env.CONSOLE_E2E_OUTPUT || path.join(artifacts,'screenshots'));
     fs.mkdirSync(output,{recursive:true});
     await page.screenshot({path:path.join(output,'desktop.png'),fullPage:true});
     await page.setViewportSize({width:390,height:844});
-    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1));
+    const overflow=await page.evaluate(()=>Array.from(document.querySelectorAll('body *')).filter(el=>el.getBoundingClientRect().right>window.innerWidth+1).map(el=>({tag:el.tagName,id:el.id,class:el.className,right:el.getBoundingClientRect().right})).slice(0,15));
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1),JSON.stringify(overflow));
     await page.screenshot({path:path.join(output,'mobile.png'),fullPage:true});
     await page.locator('[data-nav="history"]').click();await page.locator('[data-history]').first().waitFor();
     assert.deepEqual(errors,[]);console.log('Native Console E2E passed');

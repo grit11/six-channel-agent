@@ -14,5 +14,5 @@ async def parse_clinical(payload: ClinicalParseRequest, request: Request) -> Cli
     service = request.app.state.container.reasoning_service
     return ClinicalParseResponse(
         clinical_evidence=await service.parse_text(payload.text, source=payload.source),
-        parser_version="llm-clinical/v1.0" if service.llm is not None else RULE_PARSER_VERSION,
+        parser_version="llm-clinical/v1.2" if service.llm is not None else RULE_PARSER_VERSION,
     )

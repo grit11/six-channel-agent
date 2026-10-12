@@ -1,5 +1,6 @@
 """推理应用服务：运行应用级 LangGraph 子图，封装事实和 checkpoint 输出，不承载医学规则。"""
 
+from typing import cast
 from uuid import uuid4
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -7,7 +8,13 @@ from langgraph.graph.state import CompiledStateGraph
 
 from backend.app.core.exceptions import InvalidBusinessRequestError
 from backend.app.core.ports import StructuredLLM
-from backend.app.graph.six_channel_graph import SixChannelState, build_six_channel_graph, stage_seed
+from backend.app.graph.six_channel_graph import (
+    SixChannelState,
+    build_six_channel_graph,
+    response_from_state,
+    stage_seed,
+)
+from backend.app.knowledge.run_cache import run_cache_scope
 from backend.app.knowledge.service import KnowledgeService
 from backend.app.nodes.clinical_parser import parse_clinical_text, parse_clinical_with_llm
 from backend.app.schemas.clinical import ClinicalEvidence, FindingSource
@@ -35,6 +42,7 @@ class ReasoningService:
         scoring_policy: ScoringPolicy | None = None,
         evidence_gap_policy: EvidenceGapPolicy | None = None,
         max_supplement_rounds: int = 3,
+        formula_branch_recall_top_n: int = 12,
     ) -> None:
         """注入知识服务与应用级 saver；单元测试可以使用无持久化图。"""
         self.llm = llm
@@ -48,6 +56,7 @@ class ReasoningService:
             scoring_policy=scoring_policy,
             evidence_gap_policy=evidence_gap_policy,
             max_supplement_rounds=max_supplement_rounds,
+            formula_branch_recall_top_n=formula_branch_recall_top_n,
         )
 
     async def parse_text(
@@ -96,26 +105,13 @@ class ReasoningService:
     async def _invoke(self, inputs: SixChannelState) -> ReasoningResponse:
         """分配独立线程并验证输出，避免不同输入的 checkpoint 混入同一会话。"""
         thread_id = str(inputs.get("thread_id") or uuid4())
-        state = await self.graph.ainvoke(
-            {**inputs, "thread_id": thread_id}, {"configurable": {"thread_id": thread_id}}
-        )
-        return ReasoningResponse(
-            thread_id=thread_id,
-            clinical_evidence=state["clinical_evidence"],
-            eight_principles=state["eight_principles"],
-            candidates=state["channel_candidates"],
-            syndrome_relationships=state["syndrome_relationships"],
-            formula_candidates=state["formula_candidates"],
-            differential_results=state["differential_results"],
-            evidence_gaps=state["evidence_gaps"],
-            evidence_gap_decision=state["evidence_gap_decision"],
-            reasoning_paths=state["reasoning_paths"],
-            excluded_paths=state.get("excluded_paths", []),
-            evidence_catalog=state["evidence_catalog"],
-            completed_stages=state["completed_stages"],
-            similar_cases=state.get("similar_cases", []),
-            stage_snapshots=state.get("stage_snapshots", []),
-        )
+        if not thread_id.startswith("six-stage-v1.2:"):
+            thread_id = "six-stage-v1.2:" + thread_id
+        with run_cache_scope():
+            state = await self.graph.ainvoke(
+                {**inputs, "thread_id": thread_id}, {"configurable": {"thread_id": thread_id}}
+            )
+        return response_from_state(cast(SixChannelState, state), thread_id)
 
     async def analyze_text(
         self,
@@ -128,10 +124,12 @@ class ReasoningService:
     ) -> ReasoningResponse:
         """从医生原文运行当前子图，返回经过 Schema 校验的快照。"""
         # 已存在的同 thread checkpoint 可能含上一轮 clinical_evidence，必须明确传入本轮解析。
-        evidence = await self.parse_text(text, source=source)
         return await self._invoke(
             {
-                "clinical_evidence": evidence,
+                "raw_input": text,
+                "reset_clinical": True,
+                "source": source,
+                "from_stage": "clinical_parser",
                 "top_k": top_k,
                 "thread_id": thread_id or str(uuid4()),
                 "evidence_gap_context": evidence_gap_context or EvidenceGapContext(),
@@ -145,7 +143,7 @@ class ReasoningService:
         top_k: int = 3,
         thread_id: str | None = None,
         evidence_gap_context: EvidenceGapContext | None = None,
-        from_stage: ReasoningStage = "build_evidence",
+        from_stage: ReasoningStage = "clinical_parser",
         previous_result: ReasoningResponse | None = None,
     ) -> ReasoningResponse:
         """运行医生修订的事实与时间线；解析不会覆盖这份快照。"""
@@ -153,11 +151,12 @@ class ReasoningService:
             {
                 **(
                     stage_seed(previous_result, from_stage)
-                    if previous_result is not None and from_stage != "build_evidence"
+                    if previous_result is not None and from_stage != "clinical_parser"
                     else {}
                 ),
                 "from_stage": from_stage,
                 "clinical_evidence": evidence,
+                "reset_clinical": False,
                 "top_k": top_k,
                 "thread_id": thread_id or str(uuid4()),
                 "evidence_gap_context": evidence_gap_context or EvidenceGapContext(),

@@ -99,8 +99,8 @@ async def generate_channel_candidates(
     llm: StructuredLLM | None = None,
 ) -> list[ChannelCandidate]:
     """生成多经独立候选，并附加框架、经典、方证真实来源引用。"""
-    if not 1 <= top_k <= 5:
-        raise ValueError("六经候选 top_k 必须在 1 至 5 之间")
+    if not 1 <= top_k <= 6:
+        raise ValueError("六经候选 top_k 必须在 1 至 6 之间")
     if llm is not None:
         return await _generate_llm_candidates(evidence, principles, knowledge, llm, top_k=top_k)
     classic_query = build_classic_query(evidence)
@@ -153,9 +153,33 @@ async def _generate_llm_candidates(
     top_k: int,
 ) -> list[ChannelCandidate]:
     """执行 Pass A 模型宽召回，再用真实来源适用性做透明 Pass B 校正。"""
-    candidates = await generate_channel_with_llm(
+    drafts = await generate_channel_with_llm(
         evidence, principles, knowledge, llm, top_k=min(6, max(top_k, 3))
     )
+    candidates: list[ChannelCandidate] = []
+    for draft in drafts:
+        rules = [rule for rule in _RULES if rule.channel in draft.six_channels]
+        scores = [_score_rule(rule, evidence) for rule in rules]
+        # 草稿键仅是模型提议；评分必须由当前事实与明确规则重算。
+        score = max((value[0] for value in scores), default=0.0)
+        candidates.append(
+            ChannelCandidate(
+                candidate_id="channel_" + "_".join(sorted(draft.six_channels)),
+                six_channels=[str(channel) for channel in draft.six_channels],
+                provisional_syndrome=draft.provisional_syndrome,
+                independent_score=score,
+                pass_a_score=score,
+                evidence_completeness=0.0,
+                supporting_findings=list(
+                    dict.fromkeys(term for value in scores for term in value[1])
+                ),
+                contradicting_findings=list(
+                    dict.fromkeys(term for value in scores for term in value[2])
+                ),
+                missing_key_findings=sorted({term for value in scores for term in value[3]}),
+                status="active" if score >= 0.2 else "weak",
+            )
+        )
     query = build_classic_query(evidence)
     enriched: list[ChannelCandidate] = []
     for candidate in candidates:

@@ -320,7 +320,7 @@ class ReliableRuntime:
                 [scope, payload], ensure_ascii=False, sort_keys=True, separators=(",", ":")
             ).encode()
         ).hexdigest()
-        # key 本身不进入数据库键/日志；S6 身份层需把可信主体加入 scope。
+        # key 本身不进入数据库键/日志；后续身份层需把可信主体加入 scope。
         record_key = hashlib.sha256(key.encode()).hexdigest()
         async with self.store.mutex("request:" + record_key):
             receipt = await self.store.read("receipt", record_key)

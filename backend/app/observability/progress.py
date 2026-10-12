@@ -44,20 +44,49 @@ async def emit_progress(event: StreamEventName, payload: dict[str, object]) -> N
 
 
 @asynccontextmanager
-async def model_scope(capability: str) -> AsyncIterator[None]:
+async def model_scope(capability: str, *, attempt: int = 0) -> AsyncIterator[dict[str, object]]:
     """包围模型调用与响应校验，失败不提前报告完成，不记录正文。"""
     started = perf_counter()
-    await emit_progress("model_started", {"capability": capability})
+    metadata: dict[str, object] = {"attempt": attempt, "usage_status": "unavailable"}
+    await emit_progress("model_started", {"capability": capability, **metadata})
     try:
-        yield
-    except Exception:
+        yield metadata
+    except Exception as exc:
+        metadata["error_type"] = type(exc).__name__
+        metadata.setdefault(
+            "error_category",
+            (
+                "schema_validation"
+                if type(exc).__name__ == "ValidationError"
+                else (
+                    "http_status"
+                    if hasattr(exc, "response")
+                    else (
+                        "network"
+                        if type(exc).__module__.startswith("httpx")
+                        else "invalid_response"
+                    )
+                )
+            ),
+        )
+        response = getattr(exc, "response", None)
+        if response is not None:
+            metadata["http_status"] = response.status_code
         await emit_progress(
             "model_failed",
-            {"capability": capability, "duration_ms": int((perf_counter() - started) * 1000)},
+            {
+                "capability": capability,
+                "duration_ms": int((perf_counter() - started) * 1000),
+                **metadata,
+            },
         )
         raise
     else:
         await emit_progress(
             "model_completed",
-            {"capability": capability, "duration_ms": int((perf_counter() - started) * 1000)},
+            {
+                "capability": capability,
+                "duration_ms": int((perf_counter() - started) * 1000),
+                **metadata,
+            },
         )

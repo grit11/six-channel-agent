@@ -10,6 +10,8 @@ from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+from pydantic import TypeAdapter
+
 from backend.app.core.exceptions import (
     InvalidBusinessRequestError,
     InvalidStateTransitionError,
@@ -29,6 +31,7 @@ from backend.app.schemas.consultation import (
     ConsultationRerunRequest,
     ConsultationSnapshot,
     ConsultationStatus,
+    ReasoningStage,
 )
 from backend.app.schemas.reasoning_api import ReasoningResponse
 from backend.app.schemas.runtime import GraphAction, RunJob
@@ -86,7 +89,7 @@ class ConsultationService:
         return await self.repository.get(consultation_id)
 
     async def list_history(self, query: ConsultationHistoryQuery) -> ConsultationHistoryPage:
-        """只读业务摘要分页；授权过滤将由 S6 可信身份层补齐。"""
+        """只读业务摘要分页；授权过滤将由后续可信身份层补齐。"""
         return await self.repository.list_history(query)
 
     async def get_replay(self, consultation_id: UUID) -> ConsultationReplay:
@@ -118,7 +121,7 @@ class ConsultationService:
         now = datetime.now(UTC)
         initial = ConsultationSnapshot(
             consultation_id=operation_context.get() or uuid4(),
-            thread_id=str(uuid4()),
+            thread_id="six-stage-v1.2:" + str(uuid4()),
             doctor_id=request.doctor_id,
             patient_ref=request.patient_ref,
             patient_profile=request.patient_profile,
@@ -179,7 +182,7 @@ class ConsultationService:
         )
         execution = (
             running.model_copy(update={"reasoning": snapshot.reasoning})
-            if snapshot.rerun_from_stage != "build_evidence"
+            if snapshot.rerun_from_stage != "clinical_parser"
             else running
         )
         job = RunJob(
@@ -226,7 +229,7 @@ class ConsultationService:
                 top_k=running.top_k,
                 thread_id=running.thread_id,
                 evidence_gap_context=running.evidence_gap_context,
-                from_stage=running.rerun_from_stage,
+                from_stage=TypeAdapter(ReasoningStage).validate_python(running.rerun_from_stage),
                 previous_result=running.reasoning,
             )
         return await self.reasoning.analyze_text(
@@ -446,7 +449,7 @@ class ConsultationService:
                     "evidence_gap_context": context,
                     "status": "needs_evidence",
                     "reasoning": None,
-                    "rerun_from_stage": "build_evidence",
+                    "rerun_from_stage": "clinical_parser",
                 }
             )
             if request.resume:
@@ -474,13 +477,13 @@ class ConsultationService:
             if (
                 request.top_k is not None
                 and request.top_k != snapshot.top_k
-                and request.from_stage in {"differential", "evidence_gap", "topk", "similar_cases"}
+                and request.from_stage in {"differential_verification", "evidence_topk"}
             ):
                 # 方证召回数量依赖 top_k，改变它之后不能复用旧方证和后序结果。
                 raise InvalidBusinessRequestError("Top-K 已改变，请从事实构建或方证候选前重算")
             if request.top_k is not None:
                 snapshot.top_k = request.top_k
-            if request.from_stage != "build_evidence":
+            if request.from_stage != "clinical_parser":
                 if snapshot.reasoning is None or snapshot.clinical_evidence is None:
                     raise InvalidBusinessRequestError("阶段重跑需要已完成且未修改的前序结果")
                 if snapshot.clinical_evidence != snapshot.reasoning.clinical_evidence:

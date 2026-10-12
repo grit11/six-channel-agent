@@ -41,40 +41,37 @@ def test_history_profile_facts_and_stage_rerun(tmp_path: Path) -> None:
         assert (
             client.post(
                 endpoint + "/rerun",
-                json={"expected_turn": first["turn"], "from_stage": "topk", "top_k": 1},
+                json={"expected_turn": first["turn"], "from_stage": "evidence_topk", "top_k": 1},
             ).status_code
             == 400
         )
         # 从 Top-K 开始，八纲/候选/鉴别不可重新执行；后序会真正重新计算。
         with patch(
-            "backend.app.graph.six_channel_graph.analyze_eight_principles_node",
+            "backend.app.graph.six_channel_graph.analyze_eight_principles",
             AsyncMock(side_effect=AssertionError("不该重复前序")),
         ):
             rerun = client.post(
-                endpoint + "/rerun", json={"expected_turn": first["turn"], "from_stage": "topk"}
+                endpoint + "/rerun",
+                json={"expected_turn": first["turn"], "from_stage": "evidence_topk"},
             )
         assert rerun.status_code == 200
         current = rerun.json()
         assert current["thread_id"] == first["thread_id"]
-        assert current["rerun_from_stage"] == "topk"
+        assert current["rerun_from_stage"] == "evidence_topk"
         assert (
-            current["reasoning"]["stage_snapshots"][:7] == first["reasoning"]["stage_snapshots"][:7]
+            current["reasoning"]["stage_snapshots"][:4] == first["reasoning"]["stage_snapshots"][:4]
         )
-        assert current["reasoning"]["completed_stages"][-1] == "similar_cases"
-        # 后置医案重跑不能把上一轮医案引用重复追加或回流到经典排序。
-        case_rerun = client.post(
-            endpoint + "/rerun",
-            json={"expected_turn": current["turn"], "from_stage": "similar_cases"},
-        )
-        assert case_rerun.status_code == 200
-        next_snapshot = case_rerun.json()
+        assert current["reasoning"]["completed_stages"][-1] == "evidence_topk"
+        # 自动医案阶段已退役；旧 stage 不能作为新图入口，医案不自动回流。
         assert (
-            next_snapshot["reasoning"]["reasoning_paths"] == current["reasoning"]["reasoning_paths"]
+            client.post(
+                endpoint + "/rerun",
+                json={"expected_turn": current["turn"], "from_stage": "similar_cases"},
+            ).status_code
+            == 422
         )
-        assert [item["sequence"] for item in next_snapshot["reasoning"]["stage_snapshots"]] == list(
-            range(1, 10)
-        )
-        current = next_snapshot
+        assert current["reasoning"]["similar_cases"] == []
+        assert len(current["reasoning"]["stage_snapshots"]) == 5
         # 医生将当前发热改为未知，历史发热保留；不重传完整陈旧事实列表。
         edited = client.post(
             endpoint + "/evidence",
@@ -103,7 +100,7 @@ def test_history_profile_facts_and_stage_rerun(tmp_path: Path) -> None:
         )
         assert edited.status_code == 200
         current = edited.json()
-        assert current["rerun_from_stage"] == "build_evidence"
+        assert current["rerun_from_stage"] == "clinical_parser"
         fever = [
             item for item in current["clinical_evidence"]["findings"] if item["key"] == "fever"
         ]
@@ -125,7 +122,7 @@ def test_history_profile_facts_and_stage_rerun(tmp_path: Path) -> None:
         assert (
             client.post(
                 endpoint + "/rerun",
-                json={"expected_turn": historical_only["turn"], "from_stage": "topk"},
+                json={"expected_turn": historical_only["turn"], "from_stage": "evidence_topk"},
             ).status_code
             == 400
         )

@@ -3,9 +3,8 @@
 import pytest
 
 from backend.app.core.config import Settings
-from backend.app.knowledge.service import KnowledgeService
+from backend.app.knowledge.service import KnowledgeService, assess_similar_case
 from backend.app.nodes.clinical_parser import parse_clinical_text
-from backend.app.nodes.similar_cases import assess_similar_case
 from backend.app.services.reasoning_service import ReasoningService
 
 
@@ -29,7 +28,7 @@ async def test_real_case_audits_polarity_and_keeps_canonical_paths() -> None:
     )
     assert unknown.status == "insufficient"
     assert unknown.similarity_score == 0
-    assert result.similar_cases
+    assert result.similar_cases == []
     assert all(path.score_components["case_factor"] == 0 for path in result.reasoning_paths)
     assert all(
         not ref.startswith("1.2:case_")
@@ -37,5 +36,5 @@ async def test_real_case_audits_polarity_and_keeps_canonical_paths() -> None:
         for ref in path.classic_evidence
     )
     assert [stage.stage for stage in result.stage_snapshots] == result.completed_stages
-    assert result.stage_snapshots[-1].stage == "similar_cases"
-    assert result.stage_snapshots[-2].payload["reasoning_paths"][0]["case_evidence"] == []
+    assert result.stage_snapshots[-1].stage == "evidence_topk"
+    assert result.stage_snapshots[-1].payload["reasoning_paths"][0]["case_evidence"] == []

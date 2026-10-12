@@ -13,15 +13,11 @@ from backend.app.persistence.checkpoint import build_checkpoint_runtime
 from backend.app.services.reasoning_service import ReasoningService
 
 STAGES = [
-    "build_evidence",
-    "eight_principles",
-    "channel_candidates",
-    "syndrome_relationship",
-    "formula_candidates",
-    "differential",
-    "evidence_gap",
-    "topk",
-    "similar_cases",
+    "clinical_parser",
+    "six_channel_screen",
+    "formula_branch_retrieval",
+    "differential_verification",
+    "evidence_topk",
 ]
 
 
@@ -48,10 +44,10 @@ async def test_graph_restart_resumes_remaining_stages(tmp_path: Path) -> None:
                 "top_k": 3,
             },
             config,
-            interrupt_before=["syndrome_relationship"],
+            interrupt_before=["differential_verification"],
         )
         assert result["completed_stages"] == STAGES[:3]
-        assert (await graph.aget_state(config)).next == ("syndrome_relationship",)
+        assert (await graph.aget_state(config)).next == ("differential_verification",)
     finally:
         await first.close()
     second = await build_checkpoint_runtime(settings)
@@ -113,3 +109,25 @@ async def test_service_preserves_edited_evidence_and_isolates_threads(tmp_path: 
         assert snapshot.values["clinical_evidence"].course == "三日"
     finally:
         await runtime.close()
+
+
+@pytest.mark.parametrize(
+    ("text", "first"),
+    [
+        ("起病两天，发热恶风，微微汗出，头痛，脉浮而缓", "桂枝汤"),
+        ("发热恶寒，无汗，头痛，身痛，脉浮紧", "麻黄汤"),
+    ],
+)
+async def test_full_graph_uses_differential_to_separate_paths(text: str, first: str) -> None:
+    """完整五节点读取来源鉴别；正反事实切换时排序随证据变化。"""
+    knowledge = await KnowledgeService.from_directory(
+        Settings(_env_file=None).knowledge_directory, "1.2"
+    )
+    service = ReasoningService(knowledge, formula_branch_recall_top_n=12)
+    result = await service.analyze_text(text)
+    assert result.completed_stages == STAGES
+    assert result.reasoning_paths[0].formula_pattern == first
+    assert result.reasoning_paths[0].score_components["differential_factor"] > 0
+    assert any(
+        set(item.candidate_ids) == {"桂枝汤", "麻黄汤"} for item in result.differential_results
+    )

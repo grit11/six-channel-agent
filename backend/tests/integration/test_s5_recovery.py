@@ -67,7 +67,7 @@ async def test_checkpoint_result_and_review_outbox_survive_reopen(tmp_path: Path
         )
         config: RunnableConfig = {"configurable": {"thread_id": job.snapshot.thread_id}}
         state = await first.workflow.graph.aget_state(config)
-        assert state.values["result_turn"] == job.turn and state.next == ("doctor_wait",)
+        assert state.values["result_turn"] == job.turn and state.next == ("doctor_review",)
         # 模拟 reason 已提交、下一 doctor_wait 尚未首次执行的崩溃边界。
         await first.workflow.graph.aupdate_state(
             config,
@@ -81,7 +81,7 @@ async def test_checkpoint_result_and_review_outbox_survive_reopen(tmp_path: Path
             as_node="reason",
         )
         state = await first.workflow.graph.aget_state(config)
-        assert state.next == ("doctor_wait",) and not any(task.interrupts for task in state.tasks)
+        assert state.next == ("doctor_review",) and not any(task.interrupts for task in state.tasks)
         # 模拟崩溃发生在 checkpoint 计算完成后、任务结果记录提交之前。
         job.result = None
         job.lease_until = None
@@ -96,7 +96,7 @@ async def test_checkpoint_result_and_review_outbox_survive_reopen(tmp_path: Path
         saved = await second.runtime.execute(job)
         assert saved.reasoning and saved.reasoning.reasoning_paths
         second.compute.assert_not_awaited()
-        events = await repository.runtime.events(saved.consultation_id, 0)
+        events = await repository.runtime.events(saved.consultation_id, 0, limit=1000)
         assert any(item.event == "recovery_required" for item in events)
         # 已保存的医生采用成功，checkpoint 暂时失败，outbox 可由另一应用对象补偿。
         reconcile = second.workflow.reconcile

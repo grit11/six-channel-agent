@@ -114,6 +114,9 @@ def assess_source_condition(
     normalized = (
         phrase.strip().rstrip("。.").removesuffix("者").replace("（", "(").replace("）", ")")
     )
+    # 来源中的频率限定不改变症状极性；只归一整段开头的修饰语。
+    # 不拆长说明、不移除“非必见”等非必要性声明，残余词项仍保持 Unknown。
+    normalized = re.sub(r"^(?:多|常)(?=\S)", "", normalized)
     branches = _branches(normalized)
     if branches is None:
         condition.unresolved_reason = "词项、修饰语或逻辑作用域未完整规范化，保留原文供医生核验"

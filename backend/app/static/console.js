@@ -7,7 +7,8 @@
   'use strict';
   const $ = id => document.getElementById(id);
   const SAMPLE = '患者恶寒发热，无汗，头项疼痛，周身酸痛，脉浮紧。';
-  const STAGES = [['build_evidence','脉证整理'],['eight_principles','八纲分析'],['channel_candidates','六经候选'],['syndrome_relationship','病证关系'],['formula_candidates','方证召回'],['differential','鉴别反证'],['evidence_gap','补证评估'],['topk','Top-K 路径'],['similar_cases','医案参考']];
+  const STAGES = [['clinical_parser','临床事实解析'],['six_channel_screen','六经宽候选'],['formula_branch_retrieval','方证分支检索'],['differential_verification','鉴别反证核验'],['evidence_topk','证据 Top-K'],['doctor_review','医生审核']];
+  // 历史阶段名称仅用于读取旧回放，不能进入新流程进度。
   const STATUS = {created:'已创建',running:'运行中',needs_evidence:'等待补证',awaiting_doctor_review:'等待审核',completed:'已审核完成',failed:'运行失败',cancelled:'已取消',safety_escalated:'待进一步核验'};
   const ACTIONS = {accept:'采用',modify:'修改后采用',reject:'驳回',note:'备注',reorder:'调整查看顺序',add_evidence:'补证'};
   const TYPES = {classic_clause:'经典条文',formula_pattern:'方证',differential:'鉴别规则',medical_case:'历史医案',six_channel_framework:'核心框架'};
@@ -49,7 +50,7 @@
       syncControls();
     } catch(error) { $('modeBadge').textContent='服务连接异常'; toast(error.message); }
   }
-  /** 按真实九阶段事件显示进度，无事件时不补造完成。 */
+  /** 按五个自动阶段和一个人工审核阶段显示进度，无事件时不补造完成。 */
   function renderStages() {
     $('stageRow').innerHTML=STAGES.map(([key,label],index)=>`<div class="step ${state.stageDone.has(key)?'finished':state.stageActive===key?'active':''}"><div class="step-dot">${state.stageDone.has(key)?'✓':index+1}</div><div class="step-label">${label}</div></div>`).join('');
   }
@@ -102,9 +103,11 @@
     $('sessionInfo').textContent=`${STATUS[snapshot.status] || snapshot.status} · 第 ${snapshot.turn} 版 · ${snapshot.thread_id}`;
     $('reviewState').textContent=snapshot.doctor_review?`最近动作：${ACTIONS[snapshot.doctor_review.action]} · ${snapshot.doctor_review.note || '无备注'}`:'医生动作独立记录，不覆盖 Agent 原始建议。';
     $('traceSessionCount').textContent='1';
-    if(snapshot.reasoning?.completed_stages) state.stageDone=new Set(snapshot.reasoning.completed_stages);
+    state.stageDone=new Set((snapshot.reasoning?.completed_stages||[]).filter(key=>STAGES.slice(0,5).some(([id])=>id===key)));
+    if(snapshot.status==='completed' && snapshot.doctor_review) state.stageDone.add('doctor_review');
+    if(['needs_evidence','awaiting_doctor_review'].includes(snapshot.status)) state.stageActive='doctor_review';
     $('pipelineState').textContent=STATUS[snapshot.status] || snapshot.status;
-    if(snapshot.status!=='running') state.stageActive=null;
+    if(!['running','needs_evidence','awaiting_doctor_review'].includes(snapshot.status)) state.stageActive=null;
     renderStages();
     if(snapshot.status==='failed') $('stageDetail').textContent='本轮失败，可查看执行轨迹并重试。';
     syncControls();
@@ -139,7 +142,7 @@
     const ids=path?[...path.classic_evidence,...path.formula_evidence,...path.framework_evidence]:[];
     sourceCards([...new Set(ids)].map(id=>state.catalog.get(id)).filter(Boolean),'sourceList');
     $('pathAudit').textContent=path?JSON.stringify({排序组成:path.score_components,来源条件覆盖率:path.evidence_completeness,警告:path.warnings,来源核验:path.evidence_assessments,与次选鉴别:path.comparison_with_next},null,2):'尚无路径审计';
-    $('similarCases').textContent=state.snapshot?.reasoning?.similar_cases?.length?JSON.stringify(state.snapshot.reasoning.similar_cases,null,2):'当前无后置医案参考';
+    $('similarCases').textContent=state.snapshot?.reasoning?.similar_cases?.length?JSON.stringify(state.snapshot.reasoning.similar_cases,null,2):'历史医案不自动检索；可在知识中心主动查阅';
   }
   /** 按精确来源对象打开抽屉，外来文本均经转义。 */
   function openSource(item) {
@@ -179,7 +182,7 @@
         trace(name,`${payload.stage || ''} ${payload.status || ''} ${payload.count!==undefined?`来源 ${payload.count} 条`:''} ${payload.duration_ms!==undefined?`${payload.duration_ms} ms`:''}`,name.includes('failed'));
         if(item.turn >= (state.snapshot?.reasoning_run_turn || state.snapshot?.turn || 0)) {
           if(name==='stage_started') state.stageActive=payload.stage;
-          if(name==='stage_completed') state.stageDone.add(payload.stage);
+          if(name==='stage_completed' && STAGES.slice(0,5).some(([id])=>id===payload.stage)) state.stageDone.add(payload.stage);
           if(name==='stage_failed') state.stageActive=null;
           renderStages(); $('stageDetail').textContent=`${name} · ${payload.stage || payload.status || ''}`;
         }

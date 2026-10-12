@@ -32,7 +32,9 @@ class HTTPStructuredLLM:
         self._settings = settings
         self._client = client
 
-    async def _call(self, messages: list[dict[str, str]], *, structured: bool) -> str:
+    async def _call(
+        self, messages: list[dict[str, str]], *, structured: bool, usage: dict[str, object]
+    ) -> str:
         """执行单次协议请求，拒绝拒答、截断、缺少正文和非标准内容。"""
         payload: dict[str, object] = {
             "model": self._settings.llm_model,
@@ -47,11 +49,19 @@ class HTTPStructuredLLM:
         raw = response.json()
         if not isinstance(raw, dict) or not isinstance(raw.get("choices"), list):
             raise ValueError("Chat 响应缺少 choices")
+        supplied = raw.get("usage")
+        if isinstance(supplied, dict):
+            keys = ("prompt_tokens", "completion_tokens")
+            if all(type(supplied.get(key)) is int and supplied[key] >= 0 for key in keys):
+                usage.update({key: supplied[key] for key in keys})
+                usage["usage_status"] = "available"
         choices = raw["choices"]
         if len(choices) != 1 or not isinstance(choices[0], dict):
             raise ValueError("Chat 响应选择数量不合法")
         choice = choices[0]
         message = choice.get("message")
+        if choice.get("finish_reason") == "length":
+            usage["error_category"] = "truncation"
         if choice.get("finish_reason") != "stop" or not isinstance(message, dict):
             raise ValueError("Chat 响应未正常完成")
         content = message.get("content")
@@ -76,8 +86,8 @@ class HTTPStructuredLLM:
             )
         for attempt in range(self._settings.llm_max_retries + 1):
             try:
-                async with model_scope("chat"):
-                    content = await self._call(prepared, structured=schema is not None)
+                async with model_scope("chat", attempt=attempt) as usage:
+                    content = await self._call(prepared, structured=schema is not None, usage=usage)
                     return schema.model_validate_json(content) if schema is not None else content
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code not in {429, 500, 502, 503, 504}:

@@ -6,6 +6,7 @@
 import pytest
 
 from backend.app.core.config import Settings
+from backend.app.knowledge.differential import source_candidate_label
 from backend.app.knowledge.service import KnowledgeService
 from backend.app.nodes.clinical_parser import parse_clinical_text
 from backend.app.nodes.differential_reasoner import compare_formula_candidates
@@ -36,6 +37,18 @@ async def test_each_source_rule_applies_without_inventing_values(
         )
         for label in source.candidates
     ]
+    # 每条真实规则都放到超过旧截断上限的池尾，检查覆盖与候选位置无关。
+    distractors = await knowledge.search_formula("发热", top_k=12)
+    formulas = [
+        FormulaCandidate(
+            formula_name=str(item.metadata["formula_name"]),
+            association_scope=str(item.metadata["association_scope"]),
+            evidence_ids=[item.evidence_id],
+            rank_score=0.5,
+        )
+        for item in distractors
+        if source_candidate_label(str(item.metadata["formula_name"]), source.candidates) is None
+    ] + formulas
     results = await compare_formula_candidates(
         parse_clinical_text("尚未录入脉证"), formulas, knowledge
     )
@@ -88,3 +101,59 @@ async def test_group_exact_priority_avoids_dependence_on_semantic_rank(
     sources = await knowledge.search_differential(["麻黄汤", "小青龙汤"], top_k=1)
     assert sources[0].rule_id == "diff_v12_053"
     assert sources[0].retrieval_method == "candidate_group_exact"
+
+
+async def test_pool_rules_do_not_depend_on_order_or_semantic_search(
+    knowledge: KnowledgeService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """完整绑定规则一次读取；无关语义召回失败不得影响 S4 精确鉴别。"""
+
+    async def reject_search(*args: object, **kwargs: object) -> list:
+        """候选鉴别不应触发语义检索。"""
+        raise AssertionError("S4 不应逐对触发语义检索")
+
+    monkeypatch.setattr(knowledge, "search_differential", reject_search)
+    names = ["麻黄汤", "小青龙汤", "桂枝汤", "乌梅丸"]
+    forward = await knowledge.differential_rules_for_pool(names)
+    backward = await knowledge.differential_rules_for_pool(list(reversed(names)))
+    assert [item.rule_id for item in forward] == [item.rule_id for item in backward]
+    assert {item.rule_id for item in forward}.issuperset({"diff_v12_001", "diff_v12_053"})
+    assert await knowledge.differential_rules_for_pool(["桂枝汤", "乌梅丸"]) == []
+    sources = [
+        await knowledge.get_differential_by_id(f"diff_v12_{number:03}") for number in range(1, 54)
+    ]
+    all_names = [name for source in sources if source is not None for name in source.candidates]
+    complete = await knowledge.differential_rules_for_pool(all_names)
+    assert len(complete) == 53
+    assert len({item.rule_id for item in complete}) == 53
+
+
+@pytest.mark.parametrize(
+    ("names", "text", "dimension", "supported"),
+    [
+        (["桂枝汤", "麻黄汤"], "无汗", "汗", "麻黄汤证"),
+        (["太阳蓄水证", "太阳蓄血证"], "小便不利", "小便", "太阳蓄水证"),
+        (["太阳蓄水证", "太阳蓄血证"], "小便自利", "小便", "太阳蓄血证"),
+    ],
+)
+async def test_distinct_source_rules_use_current_facts(
+    knowledge: KnowledgeService, names: list[str], text: str, dimension: str, supported: str
+) -> None:
+    """不同来源规则动态归属同一核验器，未知候选条件不被当作阴性。"""
+    sources = await knowledge.differential_rules_for_pool(names)
+    assert sources
+    formulas = [
+        FormulaCandidate(
+            formula_name=name,
+            association_scope="classic_clause_based",
+            evidence_ids=[sources[0].evidence_id],
+            rank_score=0.5,
+        )
+        for name in names
+    ]
+    results = await compare_formula_candidates(parse_clinical_text(text), formulas, knowledge)
+    current = next(
+        item for result in results for item in result.dimensions if item.dimension == dimension
+    )
+    assert current.condition_assessments[supported].status == "supports"
+    assert current.status == "supports"

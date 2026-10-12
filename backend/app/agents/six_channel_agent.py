@@ -4,9 +4,12 @@
 原型 ReasoningService 仍可独立运行带 checkpoint 的子图，两种入口不共享上下文。
 """
 
+from typing import cast
+
 from langgraph.graph.state import CompiledStateGraph
 
-from backend.app.graph.six_channel_graph import stage_seed
+from backend.app.graph.six_channel_graph import SixChannelState, response_from_state, stage_seed
+from backend.app.knowledge.run_cache import run_cache_scope
 from backend.app.schemas.clinical import ClinicalEvidence
 from backend.app.schemas.consultation import ReasoningStage
 from backend.app.schemas.reasoning import EvidenceGapContext
@@ -27,39 +30,25 @@ class SixChannelAgent:
         thread_id: str,
         top_k: int,
         evidence_gap_context: EvidenceGapContext | None = None,
-        from_stage: ReasoningStage = "build_evidence",
+        from_stage: ReasoningStage = "clinical_parser",
         previous_result: ReasoningResponse | None = None,
     ) -> ReasoningResponse:
         """以医生已核对事实运行子图，保留来源和三值语义。"""
         seed = (
             stage_seed(previous_result, from_stage)
-            if previous_result is not None and from_stage != "build_evidence"
+            if previous_result is not None and from_stage != "clinical_parser"
             else {}
         )
-        state = await self.graph.ainvoke(
-            {
-                **seed,
-                "from_stage": from_stage,
-                "clinical_evidence": evidence,
-                "thread_id": thread_id,
-                "top_k": top_k,
-                "evidence_gap_context": evidence_gap_context or EvidenceGapContext(),
-            }
-        )
-        return ReasoningResponse(
-            thread_id=thread_id,
-            clinical_evidence=state["clinical_evidence"],
-            eight_principles=state["eight_principles"],
-            candidates=state["channel_candidates"],
-            syndrome_relationships=state["syndrome_relationships"],
-            formula_candidates=state["formula_candidates"],
-            differential_results=state["differential_results"],
-            evidence_gaps=state["evidence_gaps"],
-            evidence_gap_decision=state["evidence_gap_decision"],
-            reasoning_paths=state["reasoning_paths"],
-            excluded_paths=state.get("excluded_paths", []),
-            evidence_catalog=state["evidence_catalog"],
-            completed_stages=state["completed_stages"],
-            similar_cases=state.get("similar_cases", []),
-            stage_snapshots=state.get("stage_snapshots", []),
-        )
+        with run_cache_scope():
+            state = await self.graph.ainvoke(
+                {
+                    **seed,
+                    "from_stage": from_stage,
+                    "clinical_evidence": evidence,
+                    "reset_clinical": False,
+                    "thread_id": thread_id,
+                    "top_k": top_k,
+                    "evidence_gap_context": evidence_gap_context or EvidenceGapContext(),
+                }
+            )
+        return response_from_state(cast(SixChannelState, state), thread_id)

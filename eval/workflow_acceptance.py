@@ -98,7 +98,7 @@ async def run(workdir: Path) -> dict[str, object]:
         )
         config: RunnableConfig = {"configurable": {"thread_id": initial.thread_id}}
         state = await workflow.graph.aget_state(config)
-        assert state.next == ("doctor_wait",) and state.tasks[0].interrupts
+        assert state.next == ("doctor_review",) and state.tasks[0].interrupts
         supplemented = await service.add_evidence(
             initial.consultation_id,
             ConsultationEvidenceRequest(

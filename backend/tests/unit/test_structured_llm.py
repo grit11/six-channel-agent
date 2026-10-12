@@ -114,8 +114,21 @@ class FakeLLM:
         self, messages: list[dict[str, str]], schema: type[StructuredResult]
     ) -> StructuredResult:
         """验证节点专用 Prompt 后按实际 Schema 返回。"""
-        assert "不得判断六经" in messages[0]["content"]
-        return schema.model_validate(self.evidence.model_dump())
+        assert "六经" in messages[0]["content"]
+        inputs = json.loads(messages[-1]["content"])
+        assert "lexical_constraints" in inputs and "canonical_keys" in inputs
+        value = self.evidence.model_dump(include={"chief_complaint", "onset", "course"})
+        value["findings"] = [
+            item.model_dump(include={"key", "polarity", "value", "source_text", "time_scope"})
+            for item in self.evidence.findings
+            if item.source_text
+        ]
+        if (
+            self.evidence.treatment_events
+            or self.evidence.relationship_history != ClinicalEvidence().relationship_history
+        ):
+            raise ProviderUnavailableError("模型不能返回医生确认的治疗或病史")
+        return schema.model_validate(value)
 
 
 @pytest.mark.asyncio
@@ -165,7 +178,8 @@ async def test_parser_accepts_grounded_negative_with_regions() -> None:
         ],
     )
     result = await parse_clinical_with_llm("今日无汗", FakeLLM(evidence))
-    assert result == evidence
+    assert result.findings == evidence.findings
+    assert result.sweating == evidence.sweating
 
 
 @pytest.mark.asyncio

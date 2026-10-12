@@ -246,3 +246,35 @@ def test_scoring_policy_rejects_bad_weights_and_penalties() -> None:
         ScoringPolicy(core=0.9)
     with pytest.raises(ValidationError):
         ScoringPolicy(high_penalty=0.1)
+
+
+async def test_shared_supported_dimension_does_not_create_differential_bonus(
+    knowledge: KnowledgeService,
+) -> None:
+    """同一来源的双方条件都支持时仅作为共同表现，不制造候选差异分。"""
+    clinical = parse_clinical_text("脉浮紧，脉浮缓")
+    channel, formulas = await _inputs(knowledge)
+    results = await compare_formula_candidates(clinical, formulas, knowledge)
+    pulse = next(item for result in results for item in result.dimensions if item.dimension == "脉")
+    assert pulse.status == "neutral"
+    paths, _ = await build_topk_paths(
+        clinical, analyze_eight_principles(clinical), [channel], [], formulas, results, knowledge
+    )
+    assert all(path.score_components["differential_factor"] == 0 for path in paths)
+
+
+async def test_source_value_tampering_cannot_change_differential_score(
+    knowledge: KnowledgeService,
+) -> None:
+    """S5 必须重新绑定真实来源值；上游伪造某方条件不产生正证或高反证。"""
+    clinical = parse_clinical_text("汗出")
+    channel, formulas = await _inputs(knowledge)
+    results = await compare_formula_candidates(clinical, formulas, knowledge)
+    for result in results:
+        for dimension in result.dimensions:
+            dimension.candidate_values = {label: "发热" for label in dimension.candidate_values}
+    paths, _ = await build_topk_paths(
+        clinical, analyze_eight_principles(clinical), [channel], [], formulas, results, knowledge
+    )
+    assert all(path.score_components["differential_factor"] == 0 for path in paths)
+    assert all(path.score_components["high_penalty"] == 0 for path in paths)

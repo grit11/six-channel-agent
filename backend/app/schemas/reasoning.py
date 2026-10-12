@@ -108,6 +108,9 @@ class FormulaCandidate(BaseModel):
     missing_key_findings: list[str] = Field(default_factory=list)
     source_clause_nos: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(min_length=1)
+    branch_ids: list[str] = Field(default_factory=list)
+    branch_clause_evidence_ids: list[str] = Field(default_factory=list)
+    branch_status: str = "unavailable"
     risk_level: str | None = None
     rank_score: float = Field(ge=0, le=1)
 
@@ -303,6 +306,7 @@ class ReasoningStageSnapshot(BaseModel):
     stage: str
     payload: dict[str, object] = Field(default_factory=dict)
     version: str = "stage-replay/v1.0"
+    input_digest: str | None = None
 
 
 class PathConditionCoverage(BaseModel):

@@ -113,6 +113,9 @@ def build_checks(run_dir: Path, runtime_dir: Path | None = None) -> list[Check]:
             [
                 python,
                 str(ROOT / "eval/system_eval.py"),
+                "--offline",
+                "--dataset",
+                str(ROOT / "eval/datasets/engineering_cases.jsonl"),
                 "--output",
                 str(run_dir / "evaluation.json"),
             ],
@@ -205,15 +208,15 @@ def write_report(run_dir: Path, results: list[dict[str, object]], expected: int)
     """每项后刷新可审阅报告，进程中断时已完成检查仍可追查。"""
     passed = all_passed(results, expected)
     report = {
-        "version": "engineering-acceptance/v1.0",
+        "version": "engineering-acceptance/v1.2",
         "generated_at": datetime.now(UTC).isoformat(),
-        "scope": "S1–S5 工程验收；S6 后置；非临床或实机部署验收",
+        "scope": "V1.2 五自动阶段与 S6 医生审核工程验收；非临床或实机部署验收",
         "python": sys.executable,
         "expected_checks": expected,
         "overall_passed": passed,
         "checks": results,
         "deferred": [
-            "S6",
+            "生产身份认证、权限、隐私与安全分诊",
             "真实 PostgreSQL/Remote Milvus/Docker 部署与恢复",
             "在线模型质量、专家标注与独立临床评测",
         ],
@@ -222,7 +225,7 @@ def write_report(run_dir: Path, results: list[dict[str, object]], expected: int)
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     lines = [
-        "# S7 工程验收报告",
+        "# V1.2 六阶段工程验收报告",
         "",
         str(report["scope"]),
         "",
@@ -242,7 +245,7 @@ def write_report(run_dir: Path, results: list[dict[str, object]], expected: int)
 
 def main() -> int:
     """创建独立运行目录并执行全部检查，部分执行只用于定位问题。"""
-    parser = argparse.ArgumentParser(description="S7 全量工程验收与逐项报告")
+    parser = argparse.ArgumentParser(description="V1.2 全量工程验收与逐项报告")
     parser.add_argument("--only", nargs="+", help="只运行指定检查；其余标记 not_run")
     parser.add_argument(
         "--output-dir",

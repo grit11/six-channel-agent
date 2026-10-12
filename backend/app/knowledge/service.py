@@ -13,8 +13,12 @@ from pydantic import TypeAdapter
 
 from backend.app.core.exceptions import ConfigurationError, KnowledgeRetrievalError
 from backend.app.core.ports import EmbeddingProvider
+from backend.app.knowledge.branch_index import branch_digest, derive_branches, load_branch_index
 from backend.app.knowledge.classic import load_records
 from backend.app.knowledge.differential import source_candidate_label
+from backend.app.knowledge.run_cache import cached, remember
+from backend.app.nodes.clinical_parser import parse_clinical_text
+from backend.app.nodes.source_conditions import assess_source_condition
 from backend.app.observability.progress import emit_progress
 from backend.app.rag.embedding import validate_vectors
 from backend.app.rag.fusion import reciprocal_rank_fusion
@@ -31,12 +35,14 @@ from backend.app.schemas.evidence import (
     RetrievedDocument,
 )
 from backend.app.schemas.knowledge import (
+    FormulaBranchUnit,
     IndexProfile,
     IndexReport,
     KnowledgeRecord,
     KnowledgeType,
     VectorDocument,
 )
+from backend.app.schemas.reasoning import ReasoningPath, SimilarCaseAssessment
 
 
 class KnowledgeService:
@@ -45,6 +51,8 @@ class KnowledgeService:
     def __init__(self, records: list[KnowledgeRecord], version: str) -> None:
         """建立只读来源索引，不把客户端或厂商配置放进医学记录。"""
         self.version = version
+        self._branches = derive_branches(records, version)
+        self.branch_digest = branch_digest(self._branches)
         self._records = {record.knowledge_id: record for record in records}
         self._retriever = BM25Retriever(records)
         self._clauses = {
@@ -57,12 +65,28 @@ class KnowledgeService:
         self._mode = "bm25"
         self._recall_count = 20
         self._rrf_constant = 60
+        self.snapshot_digest = hashlib.sha256(
+            json.dumps(
+                [self._records[key].model_dump(mode="json") for key in sorted(self._records)],
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
 
     @classmethod
     async def from_directory(cls, directory: Path, version: str) -> "KnowledgeService":
         """在线程池加载知识文件，启动校验失败则不暴露半完成服务。"""
         records = await asyncio.to_thread(load_records, directory, version)
-        return await asyncio.to_thread(cls, records, version)
+        service = await asyncio.to_thread(cls, records, version)
+        service._branches = await asyncio.to_thread(
+            load_branch_index, directory.parent / "derived/fpeu_v12.jsonl", records, version
+        )
+        service.branch_digest = branch_digest(service._branches)
+        return service
+
+    def branch_count(self) -> int:
+        """报告通过父子来源校验的派生分支数，不泄露原文。"""
+        return len(self._branches)
 
     def counts(self) -> dict[str, int]:
         """返回按来源类型分组的加载数量，用于校验和审计。"""
@@ -313,7 +337,12 @@ class KnowledgeService:
                 raise KnowledgeRetrievalError("路径引用不属于当前知识快照")
             if record.knowledge_version != version:
                 raise KnowledgeRetrievalError("路径引用与来源版本不一致")
-            results.append(self._evidence(record))
+            key = ("source", self.snapshot_digest, evidence_id)
+            item = cached(key, Evidence)
+            if item is None:
+                item = self._evidence(record)
+                remember(key, item)
+            results.append(item)
         return results
 
     async def get_formula_by_name(self, formula_name: str) -> Evidence | None:
@@ -433,6 +462,23 @@ class KnowledgeService:
         seen = {rule.knowledge_id for rule in precise}
         return (precise + [self._rule(e) for e in related if e.knowledge_id not in seen])[:top_k]
 
+    async def differential_rules_for_pool(self, candidates: list[str]) -> list[DifferentialRule]:
+        """完整返回至少绑定两个当前候选的真实规则，供 S4 一次性核验。
+
+        与知识问答的相关召回不同，候选鉴别只接受同名或无歧义别名的来源绑定。
+        不设置语义排名或 top_k 上限，避免规则库新增规则后已有候选对被截断。
+        """
+        names = list(dict.fromkeys(candidates))
+        rules: list[DifferentialRule] = []
+        for record in self._records.values():
+            if record.knowledge_type != "differential":
+                continue
+            labels = TypeAdapter(list[str]).validate_python(record.metadata["candidates"])
+            bound = {source_candidate_label(name, labels) for name in names} - {None}
+            if len(bound) >= 2:
+                rules.append(self._rule(self._evidence(record, method="candidate_pool_exact")))
+        return sorted(rules, key=lambda item: (len(item.candidates), item.rule_id))
+
     async def resolve_differential_candidates(self, candidates: list[str]) -> dict[str, str]:
         """将同名或明确缩写映射到真实来源标签；跨规则有歧义时保留输入名。"""
         labels = {
@@ -455,6 +501,37 @@ class KnowledgeService:
         """查询 L5 历史病例，不提升为经典依据或患者处方。"""
         return await self._search("medical_case", query, top_k, channels)
 
+    async def search_formula_branches(
+        self, query: str, *, top_k: int = 12
+    ) -> tuple[list[Evidence], list[FormulaBranchUnit]]:
+        """宽召回真实方证并由经典反向扩展；不以刚生成的单经标签硬过滤。"""
+        sources = await self.search_formula(query, top_k=top_k)
+        clauses = await self.search_classic(query, top_k=min(top_k, 8))
+        gathered = {item.evidence_id: item for item in sources}
+        for clause in clauses:
+            for name in TypeAdapter(list[str]).validate_python(
+                clause.metadata.get("related_formulas", [])
+            ):
+                if isinstance(name, str):
+                    parent = await self.get_formula_by_name(name)
+                    if parent is not None:
+                        gathered.setdefault(parent.evidence_id, parent)
+        # 原召回优先，反向扩展最多同样数量；有界来源池随后按分支核验。
+        pooled = list(gathered.values())[: top_k * 2]
+        ids = {item.evidence_id for item in pooled}
+        branches = [
+            item.model_copy(deep=True) for item in self._branches if item.formula_evidence_id in ids
+        ]
+        return pooled, branches
+
+    def formula_branches(self, evidence_id: str) -> list[FormulaBranchUnit]:
+        """返回同版本已核验的分支副本；节点不得绕过此边界读取派生文件。"""
+        return [
+            item.model_copy(deep=True)
+            for item in self._branches
+            if item.formula_evidence_id == evidence_id
+        ]
+
     async def assess_candidate_evidence(
         self,
         evidence_ids: list[str],
@@ -465,10 +542,36 @@ class KnowledgeService:
     ) -> list[EvidenceAssessment]:
         """精确读取来源后按当前路径分级，杜绝调用方用伪造内容或 ID 背书。"""
         evidences = await self.get_evidence_by_ids(evidence_ids)
-        return [
-            grade_candidate_evidence(item, clinical, channels=channels, formula_name=formula_name)
-            for item in evidences
-        ]
+        facts_digest = hashlib.sha256(clinical.model_dump_json().encode()).hexdigest()
+        results: list[EvidenceAssessment] = []
+        for item in evidences:
+            key = (
+                "assessment",
+                self.snapshot_digest,
+                facts_digest,
+                item.evidence_id,
+                ",".join(sorted(channels)),
+                formula_name or "",
+                "grounded-v2",
+                self.branch_digest,
+            )
+            assessment = cached(key, EvidenceAssessment)
+            if assessment is None:
+                branches = self.formula_branches(item.evidence_id) if formula_name else []
+                assessment = grade_candidate_evidence(
+                    item,
+                    clinical,
+                    channels=channels,
+                    formula_name=formula_name,
+                    branches=(
+                        branches
+                        if item.metadata.get("association_scope") == "classic_clause_based"
+                        else None
+                    ),
+                )
+                remember(key, assessment)
+            results.append(assessment)
+        return results
 
     async def retrieve_evidence_bundle(self, query: str, top_k: int = 5) -> EvidenceBundle:
         """分层返回五类证据，保留 ID、版本及来源，不拼成无出处文本。"""
@@ -479,3 +582,78 @@ class KnowledgeService:
             differential=await self.search_differential([], query, top_k),
             cases=await self.search_case(query, top_k=top_k),
         )
+
+
+def assess_similar_case(
+    source: Evidence, clinical: ClinicalEvidence, paths: list[ReasoningPath]
+) -> SimilarCaseAssessment:
+    """初诊症状需连续对齐并用初诊局部极性纠正元数据，避免把无汗标签解释成汗出。"""
+    raw = source.metadata.get("symptoms_source_grounded", [])
+    initial = source.metadata.get("initial_visit", "")
+    channels = source.metadata.get("six_channels", [])
+    path_ids = [
+        path.path_id
+        for path in paths
+        if isinstance(channels, list) and set(path.six_channels).intersection(channels)
+    ]
+    result = SimilarCaseAssessment(
+        evidence_id=source.evidence_id,
+        path_ids=path_ids,
+        title=str(source.metadata.get("case_title", source.knowledge_id)),
+        status="insufficient",
+        reason="仅作 L5 历史参考，不改变经典归属、排名或处方；需医生核对",
+    )
+    if source.knowledge_type != "medical_case" or source.source_level != "L5" or not path_ids:
+        result.status = "irrelevant"
+        return result
+    terms = (
+        list(dict.fromkeys(term for term in raw if isinstance(term, str)))
+        if isinstance(raw, list)
+        else []
+    )
+    initial_facts = parse_clinical_text(initial).findings if isinstance(initial, str) else []
+    for term in terms:
+        if not isinstance(initial, str) or term not in initial:
+            result.missing_conditions.append(term)
+            continue
+        normalized = assess_source_condition(term, ClinicalEvidence())
+        keys = {key for branch in normalized.alternatives for key in branch}
+        # 只有明确一个事实的完整来源词项允许绑定初诊极性，复杂说明保留未知。
+        bound = [
+            fact
+            for fact in initial_facts
+            if fact.key in keys and fact.source_text and term in fact.source_text
+        ]
+        requirement = term
+        if len(keys) == 1 and bound and len({fact.polarity for fact in bound}) == 1:
+            phrase = bound[0].source_text
+            if phrase:
+                proposed = assess_source_condition(phrase, ClinicalEvidence())
+                if (
+                    proposed.alternatives
+                    and {key for branch in proposed.alternatives for key in branch} == keys
+                ):
+                    requirement = phrase
+        condition = assess_source_condition(requirement, clinical)
+        result.condition_assessments.append(condition)
+        target = (
+            result.matching_conditions
+            if condition.status == "supports"
+            else (
+                result.conflicting_conditions
+                if condition.status == "contradicts"
+                else result.missing_conditions
+            )
+        )
+        if requirement not in target:
+            target.append(requirement)
+    total = len(
+        set(result.matching_conditions + result.conflicting_conditions + result.missing_conditions)
+    )
+    result.similarity_score = len(result.matching_conditions) / max(1, total)
+    result.status = (
+        "conflicting"
+        if result.conflicting_conditions
+        else "reference" if result.matching_conditions else "insufficient"
+    )
+    return result

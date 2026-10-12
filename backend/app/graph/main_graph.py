@@ -1,6 +1,6 @@
 """会诊主图：编排六经分析、补证/审核暂停、同线程循环与终结。
 
-临床和 QA 采用分别编译的状态图及显式意图入口，QA 不接临床 saver；Safety 待 S6。
+临床和 QA 采用分别编译的状态图及显式意图入口，QA 不接临床 saver；安全分诊另行建设。
 医学规则由 SixChannelAgent 执行；主图只保存明确控制状态，不读取业务数据库。
 补证合并、身份核验、审核合法性和审计落库由应用服务执行，不能交给模型决定路由。
 """
@@ -99,7 +99,7 @@ class HumanGraphCommand(BaseModel):
     supplementation_round: int | None = Field(default=None, ge=0)
     evidence_gap_context: EvidenceGapContext | None = None
     review: dict[str, object] | None = None
-    from_stage: ReasoningStage = "build_evidence"
+    from_stage: ReasoningStage = "clinical_parser"
     previous_result: dict[str, object] | None = None
     run_turn: int | None = None
     action_id: str | None = None
@@ -120,7 +120,7 @@ def build_main_graph(
             ClinicalEvidence.model_validate(state["clinical_evidence"]),
             thread_id=state["thread_id"],
             top_k=state["top_k"],
-            from_stage=state.get("from_stage", "build_evidence"),
+            from_stage=state.get("from_stage", "clinical_parser"),
             previous_result=(
                 ReasoningResponse.model_validate(state["previous_result"])
                 if state.get("previous_result")
@@ -216,20 +216,20 @@ def build_main_graph(
 
     graph = StateGraph(MainGraphState)
     graph.add_node("reason", reason)
-    graph.add_node("doctor_wait", wait_for_doctor)
+    graph.add_node("doctor_review", wait_for_doctor)
     # 临床服务使用已校验意图；QA 用另一个 TypedDict 编译，不能将两种状态混入同一 saver。
     graph.add_conditional_edges(
         START,
         lambda state: route_main_intent(state.get("intent", "clinical")),
         {"clinical": "reason"},
     )
-    graph.add_edge("reason", "doctor_wait")
+    graph.add_edge("reason", "doctor_review")
     graph.add_conditional_edges(
-        "doctor_wait",
+        "doctor_review",
         route,
         {
             ConsultationRoute.REASON.value: "reason",
-            ConsultationRoute.WAIT.value: "doctor_wait",
+            ConsultationRoute.WAIT.value: "doctor_review",
             ConsultationRoute.FINISH.value: END,
         },
     )

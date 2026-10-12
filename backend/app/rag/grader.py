@@ -11,6 +11,7 @@ from backend.app.knowledge.differential import candidate_source_values, source_c
 from backend.app.nodes.source_conditions import assess_source_condition
 from backend.app.schemas.clinical import ClinicalEvidence
 from backend.app.schemas.evidence import Evidence, EvidenceAssessment, EvidenceGrade
+from backend.app.schemas.knowledge import FormulaBranchUnit
 
 
 class GradedEvidence(BaseModel):
@@ -119,6 +120,7 @@ def grade_candidate_evidence(
     *,
     channels: list[str],
     formula_name: str | None = None,
+    branches: list[FormulaBranchUnit] | None = None,
 ) -> EvidenceAssessment:
     """核对当前路径的来源用途；Unknown、历史或冲突只保留未解决条件。"""
     assessment = EvidenceAssessment(
@@ -132,6 +134,33 @@ def grade_candidate_evidence(
         return assessment
     if evidence.knowledge_type == "six_channel_framework":
         assessment.rationale = "框架说明用于约束解释，不能仅凭框架标签形成患者直接支持"
+        return assessment
+    if branches is not None and evidence.knowledge_type == "formula_pattern":
+        scored: list[EvidenceAssessment] = []
+        for branch in branches:
+            if branch.logical_scope != "single_clause":
+                continue
+            local = evidence.model_copy(deep=True)
+            local.metadata["key_symptoms_source_grounded"] = branch.positive_conditions
+            local.metadata["negative_findings_source_grounded"] = branch.negative_conditions
+            local.content = branch.source_quote
+            checked = grade_candidate_evidence(
+                local, clinical, channels=channels, formula_name=formula_name
+            )
+            if branch.review_status != "expert_approved" and checked.grade == "direct":
+                checked.grade = "indirect"
+            checked.rationale += "；分支 " + branch.branch_id + "，" + branch.review_status
+            scored.append(checked)
+        if scored:
+            return max(
+                scored,
+                key=lambda item: (
+                    len(item.supporting_requirements) - len(item.contradicting_requirements),
+                    -len(item.unresolved_requirements),
+                    item.rationale,
+                ),
+            )
+        assessment.unresolved_requirements = ["多方条文的局部适用分支尚未核准"]
         return assessment
     conditions = _source_conditions(evidence, formula_name)
     for condition in conditions:

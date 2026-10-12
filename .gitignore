@@ -42,3 +42,6 @@ htmlcov/
 *.pem
 *.key
 *.p12
+
+# 本地临时探针输出。
+probe*_out.json

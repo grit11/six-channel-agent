@@ -12,15 +12,19 @@ from backend.app.schemas.reasoning_api import ReasoningResponse
 from backend.app.schemas.review import DoctorReviewRecord
 
 ReasoningStage = Literal[
-    "build_evidence",
-    "eight_principles",
-    "channel_candidates",
-    "syndrome_relationship",
-    "formula_candidates",
-    "differential",
-    "evidence_gap",
-    "topk",
-    "similar_cases",
+    "clinical_parser",
+    "six_channel_screen",
+    "formula_branch_retrieval",
+    "differential_verification",
+    "evidence_topk",
+]
+WorkflowStage = Literal[
+    "clinical_parser",
+    "six_channel_screen",
+    "formula_branch_retrieval",
+    "differential_verification",
+    "evidence_topk",
+    "doctor_review",
 ]
 
 
@@ -104,7 +108,7 @@ class ConsultationRerunRequest(BaseModel):
     expected_turn: int | None = Field(default=None, ge=1)
     top_k: int | None = Field(default=None, ge=1, le=5)
     from_stage: ReasoningStage = Field(
-        default="build_evidence",
+        default="clinical_parser",
         description="从指定阶段重算；仅可复用相同事实/配置的已完成前序结果",
     )
 
@@ -146,9 +150,7 @@ class ConsultationSnapshot(BaseModel):
     last_run_duration_ms: int | None = Field(
         default=None, ge=0, description="最近一次实际推理耗时，不含医生等待时间"
     )
-    rerun_from_stage: ReasoningStage = Field(
-        default="build_evidence", description="本轮开始重算阶段"
-    )
+    rerun_from_stage: str = Field(default="clinical_parser", description="本轮开始重算阶段")
 
 
 class ConsultationHistoryQuery(BaseModel):

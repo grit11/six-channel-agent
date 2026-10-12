@@ -70,7 +70,7 @@ def test_replay_api_steps_do_not_leak_future_or_case_labels(tmp_path: Path) -> N
         assert [stage["stage"] for stage in public["stages"]] == created["reasoning"][
             "completed_stages"
         ]
-        assert public["stages"][-1]["stage"] == "similar_cases"
+        assert public["stages"][-1]["stage"] == "evidence_topk"
         assert client.get(path).json() == created
         revised = client.post(
             path + "/evidence",
@@ -88,7 +88,7 @@ def test_replay_api_steps_do_not_leak_future_or_case_labels(tmp_path: Path) -> N
         assert revised["thread_id"] == created["thread_id"]
         assert revised["clinical_evidence"]["findings"] == created["clinical_evidence"]["findings"]
         assert revised["clinical_evidence"]["relationship_history"]["history_complete"] is True
-        assert len(revised["reasoning"]["stage_snapshots"]) == 9
+        assert len(revised["reasoning"]["stage_snapshots"]) == 5
         saved = client.post(
             path + "/evidence", json={"clinical_text": "脉浮", "resume": False}
         ).json()
@@ -117,7 +117,7 @@ async def test_stage_snapshots_survive_sqlite_restart_and_old_dto_defaults(tmp_p
         graph = ReasoningService(knowledge, runtime.checkpointer).graph
         config: RunnableConfig = {"configurable": {"thread_id": result.thread_id}}
         state = await graph.aget_state(config)
-        assert [item.sequence for item in state.values["stage_snapshots"]] == list(range(1, 10))
+        assert [item.sequence for item in state.values["stage_snapshots"]] == list(range(1, 6))
         assert state.values["similar_cases"] == result.similar_cases
         old = result.model_dump(exclude={"stage_snapshots", "similar_cases"})
         assert ReasoningResponse.model_validate(old).stage_snapshots == []

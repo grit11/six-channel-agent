@@ -16,11 +16,9 @@ from backend.app.graph.six_channel_graph import build_six_channel_graph
 from backend.app.knowledge.service import KnowledgeService
 from backend.app.main import create_app
 from backend.app.nodes.clinical_parser import parse_clinical_text
-from backend.app.nodes.eight_principles import analyze_eight_principles
 from backend.app.persistence.checkpoint import build_checkpoint_runtime
 from backend.app.rag.vector_store import VectorBackendStatus
-from backend.app.schemas.clinical import ClinicalEvidence
-from backend.app.schemas.reasoning import ChannelCandidate, EightPrinciplesState, ScoringPolicy
+from backend.app.schemas.reasoning import ScoringPolicy
 from backend.app.services.reasoning_service import ReasoningService
 
 
@@ -42,25 +40,30 @@ class FlowModel:
         """从实际请求来源选取 ID，不在夹具中伪造成功来源。"""
         self.calls.append(schema.__name__)
         data = json.loads(messages[-1]["content"])
-        if schema is ClinicalEvidence:
-            return schema.model_validate(parse_clinical_text(data["clinical_text"]).model_dump())
-        evidence = ClinicalEvidence.model_validate(data["clinical_evidence"])
-        ids = [item["evidence_id"] for item in data["framework"]]
-        if schema is EightPrinciplesState:
-            result = analyze_eight_principles(evidence)
-            result.framework_evidence_ids = ["1.2:invented"] if self.invalid else ids[:1]
-            return schema.model_validate(result.model_dump())
-        candidate = ChannelCandidate(
-            candidate_id="solar",
-            six_channels=["太阳"],
-            independent_score=0.8,
-            pass_a_score=0.8,
-            supporting_findings=["fever"],
-            status="active",
-            evidence_completeness=0.5,
-            framework_evidence_ids=ids[:1],
+        if schema.__name__ == "CompactClinicalExtraction":
+            evidence = parse_clinical_text(data["clinical_text"])
+            return schema.model_validate(
+                {
+                    "findings": [
+                        item.model_dump(
+                            include={"key", "polarity", "source_text", "time_scope", "value"}
+                        )
+                        for item in evidence.findings
+                        if item.source_text
+                    ]
+                }
+            )
+        return schema.model_validate(
+            {
+                "candidates": [
+                    {
+                        "six_channels": ["太阳"],
+                        "provisional_syndrome": "太阳候选",
+                        "supporting_keys": ["invented"] if self.invalid else ["fever"],
+                    }
+                ]
+            }
         )
-        return schema.model_validate({"candidates": [candidate.model_dump()]})
 
 
 @pytest.mark.integration
@@ -93,7 +96,7 @@ def test_api_factory_injects_shared_model_and_fails_explicitly(
         response = client.post("/api/v1/reasoning/channel-candidates", json={"text": "发热，脉浮"})
         assert response.status_code == 200
         body = response.json()
-        assert body["candidates"][0]["pass_a_score"] == 0.8
+        assert body["candidates"][0]["pass_a_score"] == 0.5
         assert body["reasoning_paths"][0]["scoring_version"] == "rp13/v1.0"
         assert "excluded_paths" in body
         known_ids = {item["evidence_id"] for item in body["evidence_catalog"]}
@@ -105,8 +108,7 @@ def test_api_factory_injects_shared_model_and_fails_explicitly(
         assert set(body["eight_principles"]["framework_evidence_ids"]).issubset(
             known_ids | path_ids
         )
-        assert model.calls == (["ClinicalEvidence"] if parser_mode == "llm" else []) + [
-            "EightPrinciplesState",
+        assert model.calls == (["CompactClinicalExtraction"] if parser_mode == "llm" else []) + [
             "ChannelCandidateList",
         ]
         factory.assert_called_once()
@@ -143,11 +145,11 @@ async def test_model_scores_survive_sqlite_restart(tmp_path: Path) -> None:
     try:
         graph = build_six_channel_graph(knowledge, runtime.checkpointer, reasoning_llm=model)
         state = await graph.aget_state({"configurable": {"thread_id": result.thread_id}})
-        assert state.values["channel_candidates"][0].pass_a_score == 0.8
+        assert state.values["channel_candidates"][0].pass_a_score == 0.5
         assert (
             state.values["reasoning_paths"][0].score_components
             == result.reasoning_paths[0].score_components
         )
-        assert len(model.calls) == 2
+        assert len(model.calls) == 1
     finally:
         await runtime.close()

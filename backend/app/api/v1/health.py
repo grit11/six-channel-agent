@@ -37,7 +37,7 @@ async def versions(request: Request) -> VersionsResponse:
     """返回协议、知识库、模型和工程版本，未知配置保持明确空值。"""
     settings = request.app.state.container.settings
     return VersionsResponse(
-        protocol_version=settings.protocol_version,
+        protocol_version="1.2-six-stage",
         knowledge_base_version=settings.knowledge_base_version,
         scoring_config_version=settings.scoring_config_version,
         llm_model=settings.llm_model,
@@ -46,14 +46,18 @@ async def versions(request: Request) -> VersionsResponse:
         clinical_parser_mode=settings.clinical_parser_mode,
         reasoning_mode=settings.reasoning_mode,
         knowledge_qa_mode=settings.knowledge_qa_mode,
-        backend_build_version="0.1.0",
+        backend_build_version="1.2.0",
         prompt_version=(
-            "clinical-parser/v1.0+reasoning/v1.0"
+            "clinical-parser/v1.2+channel-candidate/v1.2"
             if settings.clinical_parser_mode == "llm" and settings.reasoning_mode == "llm"
             else (
-                "clinical-parser/v1.0"
+                "clinical-parser/v1.2"
                 if settings.clinical_parser_mode == "llm"
-                else "reasoning/v1.0" if settings.reasoning_mode == "llm" else RULE_PARSER_VERSION
+                else (
+                    "channel-candidate/v1.2"
+                    if settings.reasoning_mode == "llm"
+                    else RULE_PARSER_VERSION
+                )
             )
         ),
     )

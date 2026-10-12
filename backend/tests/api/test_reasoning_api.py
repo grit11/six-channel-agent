@@ -29,7 +29,7 @@ def test_channel_candidate_api(tmp_path: Path) -> None:
         )
     assert response.status_code == 200
     body = response.json()
-    assert len(body["candidates"]) == 5  # 宽候选先保留，最终路径才裁剪为输出 K。
+    assert len(body["candidates"]) == 6  # 宽候选先保留，最终路径才裁剪为输出 K。
     assert body["formula_candidates"]
     assert all(
         item["association_scope"] in {"classic_clause_based", "case_derived_historical"}
@@ -39,7 +39,7 @@ def test_channel_candidate_api(tmp_path: Path) -> None:
     assert all("diagnosis" not in candidate for candidate in body["candidates"])
     assert body["thread_id"]
     assert len(body["reasoning_paths"]) == 3
-    assert body["completed_stages"][-1] == "similar_cases"
+    assert body["completed_stages"][-1] == "evidence_topk"
     catalog = {item["evidence_id"] for item in body["evidence_catalog"]}
     for path in body["reasoning_paths"]:
         assert path["evidence_assessments"]
@@ -63,10 +63,10 @@ def test_channel_candidate_api(tmp_path: Path) -> None:
                 for item in path["comparison_with_next"]["differences"]
             )
         assert set(path["classic_evidence"] + path["formula_evidence"]).issubset(catalog)
-    assert body["completed_stages"].index("syndrome_relationship") < body["completed_stages"].index(
-        "formula_candidates"
-    )
-    assert body["syndrome_relationships"][0]["relationship_type"] == "uncertain"
+    assert body["completed_stages"].index("formula_branch_retrieval") < body[
+        "completed_stages"
+    ].index("differential_verification")
+    assert body["syndrome_relationships"]
 
 
 def test_evidence_input_uses_doctor_edits(tmp_path: Path) -> None:

@@ -8,6 +8,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
+from pydantic import TypeAdapter
 
 from backend.app.agents.six_channel_agent import SixChannelAgent
 from backend.app.core.exceptions import InvalidStateTransitionError
@@ -16,9 +17,17 @@ from backend.app.graph.main_graph import HumanGraphCommand, MainGraphState, buil
 from backend.app.graph.six_channel_graph import build_six_channel_graph
 from backend.app.knowledge.service import KnowledgeService
 from backend.app.schemas.clinical import ClinicalEvidence
-from backend.app.schemas.consultation import ConsultationSnapshot
+from backend.app.schemas.consultation import ConsultationSnapshot, ReasoningStage
 from backend.app.schemas.reasoning import EvidenceGapPolicy, ScoringPolicy
 from backend.app.schemas.reasoning_api import ReasoningResponse
+
+
+def workflow_config(thread_id: str) -> RunnableConfig:
+    """新图使用独立物理线程，绝不读取旧 doctor_wait 悬挂状态。"""
+    physical = (
+        thread_id if thread_id.startswith("six-stage-v1.2:") else "six-stage-v1.2:" + thread_id
+    )
+    return {"configurable": {"thread_id": physical}}
 
 
 class ConsultationWorkflow:
@@ -34,7 +43,7 @@ class ConsultationWorkflow:
         evidence: ClinicalEvidence,
     ) -> ReasoningResponse:
         """首轮运行，已暂停线程通过 Command 恢复分析；图状态不当作业务历史。"""
-        config: RunnableConfig = {"configurable": {"thread_id": snapshot.thread_id}}
+        config = workflow_config(snapshot.thread_id)
         state = await self.graph.aget_state(config)
         command = HumanGraphCommand(
             kind="reason",
@@ -43,12 +52,12 @@ class ConsultationWorkflow:
             top_k=snapshot.top_k,
             supplementation_round=snapshot.supplementation_round,
             evidence_gap_context=snapshot.evidence_gap_context,
-            from_stage=snapshot.rerun_from_stage,
+            from_stage=TypeAdapter(ReasoningStage).validate_python(snapshot.rerun_from_stage),
             previous_result=(
                 snapshot.reasoning.model_dump(mode="json") if snapshot.reasoning else None
             ),
         )
-        if state.next == ("doctor_wait",):
+        if state.next == ("doctor_review",):
             result = await self.graph.ainvoke(
                 Command(resume=command.model_dump(mode="json")), config
             )
@@ -76,22 +85,22 @@ class ConsultationWorkflow:
         command: HumanGraphCommand,
     ) -> None:
         """提交已通过业务校验的人工控制；缺少业务暂停点时明确失败。"""
-        config: RunnableConfig = {"configurable": {"thread_id": snapshot.thread_id}}
+        config = workflow_config(snapshot.thread_id)
         state = await self.graph.aget_state(config)
-        if state.next != ("doctor_wait",):
+        if state.next != ("doctor_review",):
             raise InvalidStateTransitionError("图线程未处于医生暂停点，请先重新推理")
         await self.graph.ainvoke(Command(resume=command.model_dump(mode="json")), config)
 
     async def recover_result(self, snapshot: ConsultationSnapshot) -> ReasoningResponse | None:
         """恢复计算已落 checkpoint 但业务发布未完成的相同轮次，不使用旧轮结果。"""
-        config: RunnableConfig = {"configurable": {"thread_id": snapshot.thread_id}}
+        config = workflow_config(snapshot.thread_id)
         state = await self.graph.aget_state(config)
-        # 进程可能在 reason 提交完成、doctor_wait 尚未建立 interrupt 时退出。
-        if state.next == ("doctor_wait",) and not any(task.interrupts for task in state.tasks):
+        # 进程可能在 reason 提交完成、doctor_review 尚未建立 interrupt 时退出。
+        if state.next == ("doctor_review",) and not any(task.interrupts for task in state.tasks):
             await self.graph.ainvoke(None, config)
             state = await self.graph.aget_state(config)
         if (
-            state.next == ("doctor_wait",)
+            state.next == ("doctor_review",)
             and state.values.get("result_turn") == snapshot.turn
             and state.values.get("result")
         ):
@@ -102,19 +111,19 @@ class ConsultationWorkflow:
         self, snapshot: ConsultationSnapshot, command: HumanGraphCommand, action_id: str
     ) -> None:
         """业务 outbox 的幂等人工控制；已执行标记防止重复 resume/重复审核。"""
-        config: RunnableConfig = {"configurable": {"thread_id": snapshot.thread_id}}
+        config = workflow_config(snapshot.thread_id)
         state = await self.graph.aget_state(config)
         if (
             state.values.get("action_id") == action_id
             or state.values.get("action_turn", 0) >= snapshot.turn
         ):
-            # 崩溃可能发生在人工节点完成与下一 doctor_wait 之间，恢复剩余节点。
+            # 崩溃可能发生在人工节点完成与下一 doctor_review 之间，恢复剩余节点。
             if state.next and (
-                state.next != ("doctor_wait",) or not any(task.interrupts for task in state.tasks)
+                state.next != ("doctor_review",) or not any(task.interrupts for task in state.tasks)
             ):
                 await self.graph.ainvoke(None, config)
             return
-        if state.next == ("doctor_wait",):
+        if state.next == ("doctor_review",):
             await self.graph.ainvoke(
                 Command(
                     resume=command.model_copy(
@@ -135,7 +144,7 @@ class ConsultationWorkflow:
                     "route": "finish",
                     "result": None,
                 },
-                as_node="doctor_wait",
+                as_node="doctor_review",
             )
             return
         # checkpoint 丢失或只写到半途时从已提交业务快照重建人工控制状态；
@@ -162,7 +171,7 @@ class ConsultationWorkflow:
             ),
             "route": "finish" if command.kind == "finish" else "wait",
         }
-        await self.graph.aupdate_state(config, update, as_node="doctor_wait")
+        await self.graph.aupdate_state(config, update, as_node="doctor_review")
         if command.kind != "finish":
             await self.graph.ainvoke(None, config)
 
@@ -173,6 +182,7 @@ def build_consultation_workflow(
     *,
     channel_weight: float,
     max_supplement_rounds: int,
+    formula_branch_recall_top_n: int = 12,
     reasoning_llm: StructuredLLM | None = None,
     scoring_policy: ScoringPolicy | None = None,
     evidence_gap_policy: EvidenceGapPolicy | None = None,
@@ -186,6 +196,7 @@ def build_consultation_workflow(
         scoring_policy=scoring_policy,
         evidence_gap_policy=evidence_gap_policy,
         max_supplement_rounds=max_supplement_rounds,
+        formula_branch_recall_top_n=formula_branch_recall_top_n,
     )
     agent = SixChannelAgent(child)
     return ConsultationWorkflow(

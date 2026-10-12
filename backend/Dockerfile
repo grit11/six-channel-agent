@@ -2,7 +2,7 @@
 FROM python:3.12-slim
 WORKDIR /workspace
 COPY backend /workspace/backend
-COPY knowledge/v1.2 /workspace/knowledge/v1.2
+COPY knowledge /workspace/knowledge
 COPY scripts /workspace/scripts
 RUN pip install --no-cache-dir ./backend
 EXPOSE 8000

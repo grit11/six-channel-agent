@@ -8,7 +8,7 @@ import httpx
 
 from backend.app.agents.knowledge_qa_agent import KnowledgeQAAgent
 from backend.app.core.config import Settings
-from backend.app.core.exceptions import KnowledgeRetrievalError
+from backend.app.core.exceptions import KnowledgeRetrievalError, PersistenceError
 from backend.app.core.llm import HTTPStructuredLLM, validate_llm_config
 from backend.app.core.logging import log_backend_event
 from backend.app.core.ports import EmbeddingProvider, StructuredLLM
@@ -171,7 +171,17 @@ async def open_container(settings: Settings) -> AsyncIterator[ApplicationContain
         stack.push_async_callback(vector.close)
         checkpoint = await build_checkpoint_runtime(settings)
         stack.push_async_callback(checkpoint.close)
-        database = await open_database(settings)
+        try:
+            database = await open_database(settings)
+            effective_storage = settings.consultation_storage
+        except PersistenceError:
+            # 当前用户明确允许开发环境丢失旧业务数据；PostgreSQL 故障时只把业务 Repository
+            # 降为进程内存，LangGraph checkpoint 仍由独立 SQLite fallback 管理，二者不能混用。
+            if settings.app_env == "prod" or settings.consultation_storage != "postgres":
+                raise
+            log_backend_event("business_database_fallback", "memory", "PostgreSQLUnavailable")
+            database = DatabaseRuntime("disabled")
+            effective_storage = "memory"
         stack.push_async_callback(database.close)
         knowledge = await KnowledgeService.from_directory(
             settings.knowledge_directory, settings.knowledge_base_version
@@ -186,21 +196,22 @@ async def open_container(settings: Settings) -> AsyncIterator[ApplicationContain
             scoring_policy=settings.scoring_policy,
             evidence_gap_policy=settings.evidence_gap_policy,
             max_supplement_rounds=settings.max_supplement_rounds,
+            formula_branch_recall_top_n=settings.formula_branch_recall_top_n,
         )
         repository: ConsultationRepository
-        if settings.consultation_storage == "postgres":
+        if effective_storage == "postgres":
             assert database.engine is not None
             repository = PostgresConsultationRepository(
                 database.engine, database.coordination_engine
             )
-        elif settings.consultation_storage == "memory":
+        elif effective_storage == "memory":
             repository = InMemoryConsultationRepository()
         else:
             repository = DisabledConsultationRepository()
         consultations = ConsultationService(
             repository,
             reasoning,
-            protocol_version=settings.protocol_version,
+            protocol_version="1.2-six-stage",
             knowledge_base_version=settings.knowledge_base_version,
             scoring_config_version=settings.scoring_config_version,
             max_supplement_rounds=settings.max_supplement_rounds,
@@ -214,6 +225,7 @@ async def open_container(settings: Settings) -> AsyncIterator[ApplicationContain
                 checkpoint.checkpointer,
                 channel_weight=settings.topk_channel_weight,
                 max_supplement_rounds=settings.max_supplement_rounds,
+                formula_branch_recall_top_n=settings.formula_branch_recall_top_n,
                 reasoning_llm=llm if settings.reasoning_mode == "llm" else None,
                 scoring_policy=settings.scoring_policy,
                 evidence_gap_policy=settings.evidence_gap_policy,
@@ -234,18 +246,22 @@ async def open_container(settings: Settings) -> AsyncIterator[ApplicationContain
                 "clinical_context_version": "clinical-context/v2.0",
                 "relationship_version": "relationship/v2.0",
                 "similar_case_version": "similar-case/v1.0",
-                "stage_replay_version": "stage-replay/v1.0",
+                "stage_replay_version": "stage-replay/v1.2-six-stage",
                 "retrospective_replay_version": "retrospective-replay/v1.0",
                 "prompt_version": (
-                    "clinical-parser/v1.0+reasoning/v1.0"
+                    "clinical-parser/v1.2+channel-candidate/v1.2"
                     if settings.clinical_parser_mode == "llm" and settings.reasoning_mode == "llm"
                     else (
-                        "clinical-parser/v1.0"
+                        "clinical-parser/v1.2"
                         if settings.clinical_parser_mode == "llm"
-                        else "reasoning/v1.0" if settings.reasoning_mode == "llm" else "rules-v0.3"
+                        else (
+                            "channel-candidate/v1.2"
+                            if settings.reasoning_mode == "llm"
+                            else "rules-v0.3"
+                        )
                     )
                 ),
-                "backend_build_version": "0.1.0",
+                "backend_build_version": "1.2.0",
                 "source_condition_version": "source-condition/v2",
                 "evidence_grader_version": "grounded-v2",
             },

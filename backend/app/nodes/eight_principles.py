@@ -3,9 +3,6 @@
 from collections.abc import Iterable
 from typing import cast
 
-from backend.app.core.ports import StructuredLLM
-from backend.app.knowledge.service import KnowledgeService
-from backend.app.nodes.reasoning_llm import analyze_eight_principles_with_llm
 from backend.app.schemas.clinical import ClinicalEvidence, Finding
 from backend.app.schemas.reasoning import AxisLean, EightPrinciplesState, PrincipleAxis
 
@@ -131,14 +128,3 @@ def analyze_eight_principles(evidence: ClinicalEvidence) -> EightPrinciplesState
             )
         ),
     )
-
-
-async def analyze_eight_principles_node(
-    evidence: ClinicalEvidence,
-    knowledge: KnowledgeService,
-    llm: StructuredLLM | None,
-) -> EightPrinciplesState:
-    """按显式模式选择规则基线或结构化八纲模型；模型失败不静默回退。"""
-    if llm is None:
-        return analyze_eight_principles(evidence)
-    return await analyze_eight_principles_with_llm(evidence, knowledge, llm)

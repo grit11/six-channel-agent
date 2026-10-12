@@ -40,7 +40,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application = FastAPI(
         title="六经辨证临床辅助系统",
-        version="0.1.0",
+        version="1.2.0",
         description="面向临床医生的证据辅助服务，医生完成最终审核。",
         lifespan=lifespan,
     )

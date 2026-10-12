@@ -1,32 +1,77 @@
-"""S7 离线 Parser/Reasoning/Differential/RAG 评测执行器与标注契约。
+"""Parser/Reasoning/Differential/RAG 在线评测执行器与标注契约。
 
-依赖现有规则图和 KnowledgeService；固定样例只验证工程语义，外部 JSONL 须事先去标识化。
-不修改知识、不调用在线模型、不生成专家金标准；未提供的临床标签指标保持 unavailable。
+复用模型与检索依赖工厂，默认在线解析和推理；显式 offline 用于工程回归。
+不修改知识与部署配置、不写业务会诊和 checkpoint，不生成专家金标准或隐藏推理。
 """
+
+# 直接执行入口必须先配置仓库导入路径。
 
 import argparse
 import asyncio
 import json
 import math
 import sys
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from time import perf_counter
+from typing import Literal, cast
+from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+import httpx
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from backend.app.core.config import Settings
+from backend.app.core.dependencies import configure_knowledge_service, open_llm
+from backend.app.core.exceptions import ApplicationError
 from backend.app.graph.six_channel_graph import STAGES
 from backend.app.knowledge.service import KnowledgeService
 from backend.app.nodes.clinical_parser import parse_clinical_text
 from backend.app.nodes.differential_reasoner import compare_formula_candidates
+from backend.app.observability.progress import progress_scope
+from backend.app.rag.vector_store import build_milvus_store
 from backend.app.schemas.clinical import Polarity, SixChannel
+from backend.app.schemas.events import StreamEventName
 from backend.app.schemas.reasoning import FormulaCandidate
 from backend.app.schemas.reasoning_api import ReasoningResponse
 from backend.app.services.reasoning_service import ReasoningService
+from eval.evaluation_tools import (
+    KnowledgeObserver,
+    case_trace,
+    digest,
+    experiment_identity,
+    observed_contexts,
+    set_trace_stage,
+)
+
+
+def safe_execution_error(exc: Exception) -> dict[str, object]:
+    """保留错误链类型、HTTP 状态和 Schema 字段，不保存响应、原文和凭据。"""
+    chain: list[dict[str, object]] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        item: dict[str, object] = {"error_type": type(current).__name__}
+        if isinstance(current, httpx.HTTPStatusError):
+            item["http_status"] = current.response.status_code
+        if isinstance(current, ValidationError):
+            item["validation_fields"] = [
+                {"location": list(error["loc"]), "type": error["type"]}
+                for error in current.errors(include_input=False, include_context=False)
+            ]
+        chain.append(item)
+        current = current.__cause__
+    return {
+        "error_type": type(exc).__name__,
+        "error_code": (
+            exc.code if isinstance(exc, ApplicationError) else "EVALUATION_EXECUTION_ERROR"
+        ),
+        "cause_chain": chain,
+    }
 
 
 class RetrievalLabel(BaseModel):
@@ -106,8 +151,38 @@ def path_label_metrics(groups: list[list[str]], relevant: Sequence[str]) -> dict
     return {
         "top1_recall": len(first & expected) / len(expected) if expected else 0.0,
         "top3_recall": len(top3 & expected) / len(expected) if expected else 0.0,
+        "top1_path_coverage": expected.issubset(first) if expected else None,
+        "top3_path_coverage": (
+            any(expected.issubset(group) for group in groups[:3]) if expected else None
+        ),
+        "top3_exact_path": (
+            any(expected == set(group) for group in groups[:3]) if expected else None
+        ),
         "top3_multilabel": classification_metrics(
             len(top3 & expected), len(top3 - expected), len(expected - top3)
+        ),
+    }
+
+
+def usage_summary(telemetry: dict[str, object]) -> dict[str, object]:
+    """聚合每次真实 Provider 尝试；部分缺 usage 时保留缺失，不伪造完整成本。"""
+    events = cast(list[dict[str, object]], telemetry.get("events", []))
+    completed = [
+        item for item in events if item.get("event") in {"model_completed", "model_failed"}
+    ]
+    known = [item for item in completed if item.get("usage_status") == "available"]
+    return {
+        "status": (
+            "available"
+            if completed and len(known) == len(completed)
+            else "partial" if known else "unavailable" if completed else "not_applicable"
+        ),
+        "llm_calls": len(completed),
+        "retry_attempts": sum(cast(int, item.get("attempt", 0)) > 0 for item in completed),
+        "calls_with_usage": len(known),
+        "prompt_tokens": sum(cast(int, item["prompt_tokens"]) for item in known) if known else None,
+        "completion_tokens": (
+            sum(cast(int, item["completion_tokens"]) for item in known) if known else None
         ),
     }
 
@@ -119,7 +194,7 @@ async def verify_result(result: ReasoningResponse, knowledge: KnowledgeService) 
         result.completed_stages != STAGES
         or [item.stage for item in result.stage_snapshots] != STAGES
     ):
-        errors.append("九阶段快照不完整")
+        errors.append("六阶段方案的五个自动阶段快照不完整")
     catalog = {item.evidence_id: item for item in result.evidence_catalog}
     if len(catalog) != len(result.evidence_catalog):
         errors.append("引用目录存在重复 ID")
@@ -204,11 +279,129 @@ async def retrieve(label: RetrievalLabel, knowledge: KnowledgeService) -> list[s
     return [item.evidence_id for item in items]
 
 
-async def evaluate(cases: list[EvaluationCase], output: Path) -> bool:
-    """执行全部病例并导出失败公开快照、待专家填写模板；异常不静默丢弃。"""
-    settings = Settings(_env_file=None)  # type: ignore[call-arg]
-    knowledge = await KnowledgeService.from_directory(settings.knowledge_directory, "1.2")
-    reasoning = ReasoningService(knowledge)
+def evaluation_settings(
+    *, online: bool, env_file: Path | None = None, ablation: str | None = None
+) -> Settings:
+    """在线读取真实配置并明确启用 LLM；离线固定规则，均不改写 .env。"""
+    if ablation not in {None, "A", "B", "C", "D"}:
+        raise ValueError("ablation 必须为 A/B/C/D")
+    if online or ablation is not None:
+        group = ablation
+        baseline = Settings(_env_file=env_file or ROOT / ".env")  # type: ignore[call-arg]
+        return Settings(  # type: ignore[call-arg]
+            _env_file=env_file or ROOT / ".env",
+            clinical_parser_mode="rules" if group == "A" else "llm",
+            reasoning_mode="rules" if group == "A" else "llm",
+            retrieval_mode=(
+                "bm25"
+                if group in {"A", "B"}
+                else "hybrid" if group in {"C", "D"} else baseline.retrieval_mode
+            ),
+            reranker_enabled=(group == "D" if group else baseline.reranker_enabled),
+        )
+    return Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        clinical_parser_mode="rules",
+        reasoning_mode="rules",
+        retrieval_mode="bm25",
+        reranker_enabled=False,
+    )
+
+
+@asynccontextmanager
+async def evaluation_runtime(
+    settings: Settings, *, online: bool
+) -> AsyncIterator[tuple[KnowledgeService, ReasoningService, dict[str, object]]]:
+    """复用生产模型/检索工厂，整个批次共享客户端，独立评测无需业务数据库。"""
+    async with AsyncExitStack() as stack:
+        knowledge = await KnowledgeService.from_directory(
+            settings.knowledge_directory, settings.knowledge_base_version
+        )
+        backend: str | None = None
+        degraded = False
+        llm = None
+        if online:
+            if settings.reasoning_mode == "llm" or settings.clinical_parser_mode == "llm":
+                llm = await stack.enter_async_context(open_llm(settings))
+            vector = await build_milvus_store(settings)
+            stack.push_async_callback(vector.close)
+            await configure_knowledge_service(settings, knowledge, vector, stack)
+            backend = vector.status.backend
+            degraded = vector.status.degraded
+        reasoning = ReasoningService(
+            knowledge,
+            llm=llm,
+            reasoning_llm=llm,
+            channel_weight=settings.topk_channel_weight,
+            scoring_policy=settings.scoring_policy,
+            evidence_gap_policy=settings.evidence_gap_policy,
+            max_supplement_rounds=settings.max_supplement_rounds,
+        )
+        yield knowledge, reasoning, {
+            "online": online,
+            "clinical_parser_mode": settings.clinical_parser_mode,
+            "reasoning_mode": settings.reasoning_mode,
+            "retrieval_mode": settings.retrieval_mode,
+            "llm_model": settings.llm_model if online else None,
+            "embedding_model": settings.embedding_model if online else None,
+            "reranker_model": (
+                settings.reranker_model if online and settings.reranker_enabled else None
+            ),
+            "reranker_enabled": settings.reranker_enabled,
+            "vector_backend": backend,
+            "degraded": degraded,
+            "checkpoint_backend": "none_evaluation",
+            "consultation_storage": "none_evaluation",
+            "scoring_policy": settings.scoring_policy.model_dump(mode="json"),
+            "experiment_identity": await asyncio.to_thread(experiment_identity, ROOT, settings),
+        }
+
+
+async def evaluate(
+    cases: list[EvaluationCase],
+    output: Path,
+    *,
+    online: bool = True,
+    env_file: Path | None = None,
+    concurrency: int = 2,
+    expected_count: int | None = None,
+    case_timeout: float = 180,
+    ablation: str | None = None,
+    resume: bool = False,
+) -> bool:
+    """运行完整独立批次；部署资源初始化失败明确退出，不回退离线。"""
+    if concurrency < 1 or concurrency > 8:
+        raise ValueError("concurrency 必须在 1–8 之间")
+    settings = evaluation_settings(online=online, env_file=env_file, ablation=ablation)
+    async with evaluation_runtime(settings, online=online) as (knowledge, reasoning, runtime):
+        runtime["ablation"] = ablation
+        with KnowledgeObserver(knowledge):
+            return await evaluate_with_runtime(
+                cases,
+                output,
+                knowledge,
+                reasoning,
+                runtime,
+                concurrency,
+                expected_count=expected_count,
+                case_timeout=case_timeout,
+                resume=resume,
+            )
+
+
+async def evaluate_with_runtime(
+    cases: list[EvaluationCase],
+    output: Path,
+    knowledge: KnowledgeService,
+    reasoning: ReasoningService,
+    runtime: dict[str, object],
+    concurrency: int = 2,
+    *,
+    expected_count: int | None = None,
+    case_timeout: float = 180,
+    resume: bool = False,
+) -> bool:
+    """只将病例原文送入图；完成后评分，异常逐案落盘并保留失败分母。"""
     counts = [0, 0, 0]
     labelled_cases = 0
     negative_total = negative_correct = unknown_total = unknown_correct = 0
@@ -216,77 +409,259 @@ async def evaluate(cases: list[EvaluationCase], output: Path) -> bool:
     channel_rows: list[dict[str, object]] = []
     formula_rows: list[dict[str, object]] = []
     retrieval_rows: list[dict[str, object]] = []
-    for case in cases:
-        result = await reasoning.analyze_text(case.text)
-        current = {item.key: item.polarity for item in result.clinical_evidence.current_findings()}
-        explicit = {(key, value) for key, value in current.items() if value != "unknown"}
-        errors = await verify_result(result, knowledge)
-        if case.expected_current is not None:
-            labelled_cases += 1
-            expected = {
-                (key, value) for key, value in case.expected_current.items() if value != "unknown"
+    telemetry_by_case: dict[str, dict[str, object]] = {}
+    semaphore = asyncio.Semaphore(concurrency)
+    input_digest = digest([case.model_dump(mode="json") for case in cases])
+    signature = {
+        "input_digest": input_digest,
+        "runtime": runtime,
+        "expected_sample_count": expected_count or len(cases),
+        "case_timeout": case_timeout,
+    }
+    previous: dict[str, dict[str, object]] = {}
+    if await asyncio.to_thread(output.exists):
+        if not resume:
+            raise FileExistsError("报告已存在，请使用 --resume 或选择新的 --output")
+        old = json.loads(await asyncio.to_thread(output.read_text, encoding="utf-8"))
+        if old.get("evaluation_signature") != signature:
+            raise ValueError("输入、配置、代码、提示或知识身份改变，禁止混合续跑")
+        old_rows = old["cases"]
+        if len({row["case_id"] for row in old_rows}) != len(old_rows):
+            raise ValueError("旧报告包含重复病例")
+        previous = {row["case_id"]: row for row in old_rows}
+        if not set(previous).issubset({case.case_id for case in cases}):
+            raise ValueError("旧报告包含输入集之外的病例")
+
+    async def analyze(
+        case: EvaluationCase,
+    ) -> tuple[
+        EvaluationCase, ReasoningResponse | None, float, dict[str, object], list[dict[str, object]]
+    ]:
+        """限流在线调用；错误仅保存安全类型与业务码，不泄露请求正文或凭据。"""
+        async with semaphore:
+            saved = previous.get(case.case_id)
+            if saved and saved.get("passed") is True and saved.get("result") is not None:
+                if saved.get("input_text") != case.text:
+                    raise ValueError("续跑原文不一致")
+                telemetry_by_case[case.case_id] = cast(
+                    dict[str, object], saved.get("telemetry", {})
+                )
+                return (
+                    case,
+                    ReasoningResponse.model_validate(saved["result"]),
+                    float(cast(float, saved["runtime_seconds"])),
+                    cast(dict[str, object], saved.get("telemetry", {})),
+                    cast(list[dict[str, object]], saved.get("knowledge_calls", [])),
+                )
+            started = perf_counter()
+            progress: dict[str, object] = {}
+            calls: list[dict[str, object]] = []
+            telemetry: dict[str, object] = {"events": []}
+            telemetry_by_case[case.case_id] = telemetry
+
+            async def track(event: StreamEventName, payload: dict[str, object]) -> None:
+                """仅记录阶段与能力名称用于定位错误，事件不包含病例或模型正文。"""
+                cast(list[dict[str, object]], telemetry["events"]).append(
+                    {"event": event, **payload}
+                )
+                if payload.get("stage") is not None:
+                    progress["stage"] = payload["stage"]
+                    set_trace_stage(str(payload["stage"]))
+                if event == "model_failed":
+                    progress["capability"] = payload.get("capability")
+
+            try:
+                progress["stage"] = "clinical_parser"
+                with case_trace(calls):
+                    async with asyncio.timeout(case_timeout), progress_scope(track):
+                        result = await reasoning.analyze_text(case.text)
+                return case, result, perf_counter() - started, {}, calls
+            except Exception as exc:  # noqa: BLE001 -- 批评测需保留异常病例并继续其余病例。
+                return (
+                    case,
+                    None,
+                    perf_counter() - started,
+                    {**safe_execution_error(exc), **progress, "telemetry": telemetry},
+                    calls,
+                )
+
+    tasks = [asyncio.create_task(analyze(case)) for case in cases]
+    try:
+        for task in asyncio.as_completed(tasks):
+            case, result, runtime_seconds, failure, calls = await task
+            status = "failed" if result is None else "completed"
+            print(
+                f"System {len(records)+1}/{len(cases)} {case.case_id}: {status}",
+                flush=True,
+            )
+            if result is None:
+                records.append(
+                    {
+                        "case_id": case.case_id,
+                        "input_text": case.text,
+                        "runtime_seconds": runtime_seconds,
+                        "passed": False,
+                        "errors": [failure["error_code"]],
+                        "execution_error": failure,
+                        "knowledge_calls": calls,
+                        "telemetry": telemetry_by_case.get(
+                            case.case_id, failure.get("telemetry", {})
+                        ),
+                        "token_usage": usage_summary(telemetry_by_case.get(case.case_id, {})),
+                        "retrieved_contexts": observed_contexts(calls),
+                        "result": None,
+                    }
+                )
+                await asyncio.to_thread(
+                    export_evaluation,
+                    output,
+                    {
+                        "status": "running",
+                        "complete_benchmark": False,
+                        "passed": False,
+                        "runtime": runtime,
+                        "evaluation_signature": signature,
+                        "cases": records,
+                    },
+                    records,
+                    cases,
+                )
+                continue
+            current = {
+                item.key: item.polarity for item in result.clinical_evidence.current_findings()
             }
-            for index, amount in enumerate(
-                (len(explicit & expected), len(explicit - expected), len(expected - explicit))
+            explicit = {(key, value) for key, value in current.items() if value != "unknown"}
+            errors = await verify_result(result, knowledge)
+            if case.expected_current is not None:
+                labelled_cases += 1
+                expected = {
+                    (key, value)
+                    for key, value in case.expected_current.items()
+                    if value != "unknown"
+                }
+                for index, amount in enumerate(
+                    (len(explicit & expected), len(explicit - expected), len(expected - explicit))
+                ):
+                    counts[index] += amount
+                if explicit != expected:
+                    errors.append("当前事实与完整事实标签不符")
+                for key, polarity in case.expected_current.items():
+                    if polarity == "negative":
+                        negative_total += 1
+                        negative_correct += int(current.get(key) == "negative")
+            unknown_keys = set(case.expected_unknown) | {
+                key
+                for key, polarity in (case.expected_current or {}).items()
+                if polarity == "unknown"
+            }
+            unknown_total += len(unknown_keys)
+            unknown_correct += sum(current.get(key) == "unknown" for key in unknown_keys)
+            if any(current.get(key) != "unknown" for key in unknown_keys):
+                errors.append("应保留未知的事实被补造或丢失")
+            if not set(case.conflicted_keys).issubset(
+                {item.key for item in result.clinical_evidence.contradictions}
+            ) or any(key in current for key in case.conflicted_keys):
+                errors.append("同时间冲突事实未隔离")
+            paths = result.reasoning_paths
+            for labels, predicted, rows in (
+                (
+                    case.expected_channels,
+                    [path.six_channels for path in paths],
+                    channel_rows,
+                ),
+                (
+                    case.expected_formulas,
+                    [[path.formula_pattern] if path.formula_pattern else [] for path in paths],
+                    formula_rows,
+                ),
             ):
-                counts[index] += amount
-            if explicit != expected:
-                errors.append("当前事实与完整事实标签不符")
-            for key, polarity in case.expected_current.items():
-                if polarity == "negative":
-                    negative_total += 1
-                    negative_correct += int(current.get(key) == "negative")
-        unknown_keys = set(case.expected_unknown) | {
-            key for key, polarity in (case.expected_current or {}).items() if polarity == "unknown"
-        }
-        unknown_total += len(unknown_keys)
-        unknown_correct += sum(current.get(key) == "unknown" for key in unknown_keys)
-        if any(current.get(key) != "unknown" for key in unknown_keys):
-            errors.append("应保留未知的事实被补造或丢失")
-        if not set(case.conflicted_keys).issubset(
-            {item.key for item in result.clinical_evidence.contradictions}
-        ) or any(key in current for key in case.conflicted_keys):
-            errors.append("同时间冲突事实未隔离")
-        paths = result.reasoning_paths
-        for labels, predicted, rows in (
-            (
-                case.expected_channels,
-                [path.six_channels for path in paths],
-                channel_rows,
-            ),
-            (
-                case.expected_formulas,
-                [[path.formula_pattern] if path.formula_pattern else [] for path in paths],
-                formula_rows,
-            ),
-        ):
-            if labels:
-                rows.append({"case_id": case.case_id, **path_label_metrics(predicted, labels)})
-        for label in case.retrieval:
-            ids = await retrieve(label, knowledge)
-            retrieval_rows.append(
+                if labels:
+                    rows.append({"case_id": case.case_id, **path_label_metrics(predicted, labels)})
+            for label in case.retrieval:
+                ids = await retrieve(label, knowledge)
+                retrieval_rows.append(
+                    {
+                        "case_id": case.case_id,
+                        "kind": label.kind,
+                        "at_5": ranking_metrics(ids, label.relevant_ids, 5),
+                        "at_10": ranking_metrics(ids, label.relevant_ids, 10),
+                    }
+                )
+                if label.clause_id and not set(label.relevant_ids).issubset(ids):
+                    errors.append("精确条文目标未命中")
+            records.append(
                 {
                     "case_id": case.case_id,
-                    "kind": label.kind,
-                    "at_5": ranking_metrics(ids, label.relevant_ids, 5),
-                    "at_10": ranking_metrics(ids, label.relevant_ids, 10),
+                    "input_text": case.text,
+                    "runtime_seconds": runtime_seconds,
+                    "passed": not errors,
+                    "errors": errors,
+                    "result": result.model_dump(mode="json"),
+                    "knowledge_calls": calls,
+                    "retrieved_contexts": observed_contexts(calls),
+                    "telemetry": telemetry_by_case.get(case.case_id, {}),
+                    "token_usage": usage_summary(telemetry_by_case.get(case.case_id, {})),
+                    "stage_snapshots_bytes": len(
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in result.stage_snapshots],
+                            ensure_ascii=False,
+                        ).encode()
+                    ),
+                    "formula_funnel": {
+                        "candidate_pool": [item.formula_name for item in result.formula_candidates],
+                        "branch_ids": [
+                            ref for item in result.formula_candidates for ref in item.branch_ids
+                        ],
+                        "final_topk": [item.formula_pattern for item in result.reasoning_paths],
+                    },
                 }
             )
-            if label.clause_id and not set(label.relevant_ids).issubset(ids):
-                errors.append("精确条文目标未命中")
-        records.append(
-            {
-                "case_id": case.case_id,
-                "passed": not errors,
-                "errors": errors,
-                "result": result.model_dump(mode="json"),
-            }
-        )
-    differential = await differential_regression(knowledge)
-    passed = all(item["passed"] for item in records) and differential["passed"] == 53
+            await asyncio.to_thread(
+                export_evaluation,
+                output,
+                {
+                    "status": "running",
+                    "complete_benchmark": False,
+                    "passed": False,
+                    "runtime": runtime,
+                    "evaluation_signature": signature,
+                    "cases": records,
+                },
+                records,
+                cases,
+            )
+    finally:
+        # 中断时释放未完成请求，最近落盘报告仍标记 running，不伪装全量。
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    order = {case.case_id: index for index, case in enumerate(cases)}
+    records.sort(key=lambda row: order[str(row["case_id"])])
+    differential = (
+        await differential_regression(knowledge)
+        if not runtime["online"]
+        else {"status": "not_run_online", "reason": "独立规则回归不得调用在线检索干扰批次收尾"}
+    )
+    passed = all(item["passed"] for item in records) and (
+        bool(runtime["online"]) or differential.get("passed") == 53
+    )
     report = {
-        "version": "system-evaluation/v1.0",
-        "mode": "rules/bm25/extractive",
+        "version": "system-evaluation/v1.1",
+        "mode": (
+            f"online/{runtime.get('reasoning_mode', 'llm')}/{runtime['retrieval_mode']}"
+            if runtime["online"]
+            else "rules/bm25/extractive"
+        ),
+        "runtime": runtime,
+        "evaluation_signature": signature,
+        "status": "completed",
+        "complete_benchmark": len(records) == (expected_count or len(cases)),
+        "expected_sample_count": expected_count or len(cases),
+        "sample_count": len(records),
+        "execution_failed": sum(row["result"] is None for row in records),
+        "input_count": len(cases),
+        "input_digest": input_digest,
         "scope": "工程语义与来源完整性；排序指标只有外部标签才可计算，非临床结论",
         "passed": passed,
         "knowledge_version": knowledge.version,
@@ -326,7 +701,13 @@ def export_evaluation(
 ) -> None:
     """由工作线程写报告和空标签模板；失败快照只保留公开 DTO。"""
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 原子替换防止读取者碰到半份 JSON；临时文件与目标位于同一文件系统。
+    temporary = output.with_name(output.name + "." + uuid4().hex + ".tmp")
+    try:
+        temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(output)
+    finally:
+        temporary.unlink(missing_ok=True)
     output.with_suffix(".failures.jsonl").write_text(
         "".join(
             json.dumps(item, ensure_ascii=False) + "\n" for item in records if not item["passed"]
@@ -354,13 +735,48 @@ def export_evaluation(
 
 def main() -> int:
     """默认运行固定工程集；外部数据只读取明确指定的已去标识化 JSONL。"""
-    parser = argparse.ArgumentParser(description="离线系统评测和公开失败回放")
+    parser = argparse.ArgumentParser(description="在线系统评测和公开失败回放")
     parser.add_argument(
-        "--dataset", type=Path, default=ROOT / "eval/datasets/engineering_cases.jsonl"
+        "--dataset",
+        type=Path,
+        default=ROOT / "eval/datasets/benchmark48/cases_eval_compatible.jsonl",
     )
-    parser.add_argument("--output", type=Path, default=ROOT / "data/system_evaluation.json")
+    parser.add_argument("--output", type=Path, default=ROOT / "data/benchmark48/online.json")
+    parser.add_argument("--offline", action="store_true", help="显式使用规则/BM25 工程回归")
+    parser.add_argument("--env-file", type=Path)
+    parser.add_argument("--concurrency", type=int, default=2)
+    parser.add_argument("--limit", type=int, help="仅在线验证前 N 条，报告记录真实输入数量")
+    parser.add_argument("--case-timeout", type=float, default=180, help="单案总时限（秒）")
+    parser.add_argument("--ablation", choices=["A", "B", "C", "D"], help="固定消融组")
+    parser.add_argument("--resume", action="store_true", help="严格核验实验身份后复用成功病例")
     args = parser.parse_args()
-    return 0 if asyncio.run(evaluate(load_cases(args.dataset), args.output)) else 1
+    cases = load_cases(args.dataset)
+    if args.offline and args.ablation:
+        parser.error("--offline 与 --ablation 不能同时使用")
+    expected_count = len(cases)
+    if args.case_timeout <= 0:
+        parser.error("--case-timeout 必须大于零")
+    if args.limit is not None:
+        if args.limit < 1:
+            parser.error("--limit 必须大于零")
+        cases = cases[: args.limit]
+    return (
+        0
+        if asyncio.run(
+            evaluate(
+                cases,
+                args.output,
+                online=not args.offline,
+                env_file=args.env_file,
+                concurrency=args.concurrency,
+                expected_count=expected_count,
+                case_timeout=args.case_timeout,
+                ablation=args.ablation,
+                resume=args.resume,
+            )
+        )
+        else 1
+    )
 
 
 if __name__ == "__main__":

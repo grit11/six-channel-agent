@@ -17,7 +17,17 @@ async def main() -> None:
     service = await KnowledgeService.from_directory(
         settings.knowledge_directory, settings.knowledge_base_version
     )
-    print(json.dumps({"version": service.version, "counts": service.counts()}, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "version": service.version,
+                "counts": service.counts(),
+                "fpeu_digest": service.branch_digest,
+                "fpeu_count": service.branch_count(),
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 if __name__ == "__main__":

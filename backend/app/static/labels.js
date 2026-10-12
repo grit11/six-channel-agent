@@ -1,5 +1,11 @@
 /** 临床字段中文显示；只翻译字段名，不包含医学规则或评分。 */
 window.CONSOLE_LABELS = {
+  clinical_parser: "临床事实解析",
+  six_channel_screen: "六经宽候选",
+  formula_branch_retrieval: "方证分支检索",
+  differential_verification: "鉴别反证核验",
+  evidence_topk: "证据 Top-K",
+  doctor_review: "医生审核",
   fever: "发热",
   high_fever: "高热",
   chills: "恶寒",

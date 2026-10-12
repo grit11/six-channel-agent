@@ -139,6 +139,30 @@ async def test_differential_splits_candidate_values_and_records_counterevidence(
 
 
 @pytest.mark.asyncio
+async def test_full_formula_pool_reaches_late_guizhi_mahuang_differential(
+    knowledge: KnowledgeService,
+) -> None:
+    """完整 S3 方证池不能截断 S4；汗出、浮缓应触发桂枝/麻黄鉴别。"""
+    evidence = parse_clinical_text("起病两天，发热恶风，微微汗出，头痛，脉浮而缓")
+    channel = ChannelCandidate(
+        candidate_id="solar",
+        six_channels=["太阳"],
+        independent_score=0.8,
+        supporting_findings=["发热", "aversion_to_wind", "sweating"],
+        evidence_completeness=0.5,
+        status="active",
+    )
+    formulas = await generate_formula_candidates(evidence, [channel], knowledge, top_k=12)
+    assert "麻黄汤" in {item.formula_name for item in formulas}
+    results = await compare_formula_candidates(evidence, formulas, knowledge)
+    pair = next(item for item in results if {"桂枝汤", "麻黄汤"}.issubset(item.candidate_ids))
+    sweat = next(item for item in pair.dimensions if item.dimension == "汗")
+    assert sweat.status == "supports"
+    assert any("桂枝汤" in item for item in pair.decisive_support)
+    assert any("麻黄汤" in item for item in pair.decisive_contradictions)
+
+
+@pytest.mark.asyncio
 async def test_differential_preserves_observed_facts_in_complex_conditions(
     knowledge: KnowledgeService,
 ) -> None:
