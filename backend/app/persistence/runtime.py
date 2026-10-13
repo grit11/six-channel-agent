@@ -124,11 +124,11 @@ class MemoryRuntimeStore:
         self._emit(
             snapshot.consultation_id, snapshot.turn, "snapshot_updated", {"status": snapshot.status}
         )
-        if snapshot.status in {"completed", "cancelled", "failed"}:
+        if snapshot.status in {"completed", "cancelled", "undetermined", "failed"}:
             self._emit(
                 snapshot.consultation_id,
                 snapshot.turn,
-                "failed" if snapshot.status == "failed" else "completed",
+                "failed" if snapshot.status == "failed" else "consultation_completed",
                 {"status": snapshot.status},
             )
 
@@ -277,12 +277,12 @@ class PostgresRuntimeStore:
             "snapshot_updated",
             {"status": snapshot.status},
         )
-        if snapshot.status in {"completed", "cancelled", "failed"}:
+        if snapshot.status in {"completed", "cancelled", "undetermined", "failed"}:
             await self.append_event(
                 session,
                 snapshot.consultation_id,
                 snapshot.turn,
-                "failed" if snapshot.status == "failed" else "completed",
+                "failed" if snapshot.status == "failed" else "consultation_completed",
                 {"status": snapshot.status},
             )
 

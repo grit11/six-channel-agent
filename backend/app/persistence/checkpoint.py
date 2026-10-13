@@ -19,24 +19,22 @@ from backend.app.core.logging import log_backend_event
 def checkpoint_serializer() -> JsonPlusSerializer:
     """只允许业务图实际使用的 DTO 类型，禁止任意模块反序列化或 pickle 降级。"""
     modules = [
-        ("backend.app.schemas.clinical", "ClinicalEvidence"),
-        ("backend.app.schemas.evidence", "Evidence"),
-        *[
-            ("backend.app.schemas.reasoning", name)
-            for name in (
-                "EightPrinciplesState",
-                "ChannelCandidate",
-                "SyndromeRelationship",
-                "FormulaCandidate",
-                "DifferentialResult",
-                "EvidenceGap",
-                "ReasoningPath",
-                "EvidenceGapContext",
-                "EvidenceGapDecision",
-                "SimilarCaseAssessment",
-                "ReasoningStageSnapshot",
-            )
-        ],
+        ("backend.app.clinical_v2.schemas", name)
+        for name in (
+            "ClinicalEvidenceV2",
+            "FindingV2",
+            "SourceSpanV2",
+            "ChannelLocalizationV2",
+            "ChannelHypothesisV2",
+            "RetrievalBundleV2",
+            "RetrievalQueryPlanV2",
+            "FormulaEvidenceCandidateV2",
+            "EvidenceRefV2",
+            "ComparisonV2",
+            "CandidateComparisonV2",
+            "HumanGraphCommandV2",
+            "V2Event",
+        )
     ]
     return JsonPlusSerializer(allowed_msgpack_modules=modules, allowed_json_modules=modules)
 

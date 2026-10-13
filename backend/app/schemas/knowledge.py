@@ -198,21 +198,3 @@ class IndexReport(BaseModel):
     counts: dict[str, int] = Field(description="核验后的五类文档数量")
     collections: dict[str, str] = Field(description="当前已发布物理集合")
     reused: bool = Field(description="是否复用完全相同的已发布快照")
-
-
-class FormulaBranchUnit(BaseModel):
-    """从真实父方证和单条经典派生的分支，不是新增知识类型或专家核准规则。"""
-
-    model_config = ConfigDict(extra="forbid")
-    branch_id: str = Field(min_length=1)
-    formula_evidence_id: str = Field(min_length=1)
-    clause_evidence_ids: list[str] = Field(min_length=1)
-    formula_name: str = Field(min_length=1)
-    canonical_channels: list[str] = Field(default_factory=list)
-    positive_conditions: list[str] = Field(default_factory=list)
-    negative_conditions: list[str] = Field(default_factory=list)
-    review_status: Literal["expert_approved", "source_verified_pending_expert"]
-    provenance: str = Field(min_length=1)
-    knowledge_version: str = Field(min_length=1)
-    source_quote: str = Field(min_length=1)
-    logical_scope: Literal["single_clause", "unresolved_multiformula"] = "single_clause"

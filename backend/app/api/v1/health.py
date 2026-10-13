@@ -2,7 +2,6 @@
 
 from fastapi import APIRouter, Request
 
-from backend.app.nodes.clinical_parser import RULE_PARSER_VERSION
 from backend.app.schemas.events import HealthResponse, VersionsResponse
 
 router = APIRouter(tags=["system"])
@@ -37,27 +36,15 @@ async def versions(request: Request) -> VersionsResponse:
     """返回协议、知识库、模型和工程版本，未知配置保持明确空值。"""
     settings = request.app.state.container.settings
     return VersionsResponse(
-        protocol_version="1.2-six-stage",
+        protocol_version="clinical-v2.0",
         knowledge_base_version=settings.knowledge_base_version,
-        scoring_config_version=settings.scoring_config_version,
+        scoring_config_version="removed",
         llm_model=settings.llm_model,
         embedding_model=settings.embedding_model,
         reranker_model=settings.reranker_model,
-        clinical_parser_mode=settings.clinical_parser_mode,
-        reasoning_mode=settings.reasoning_mode,
+        clinical_parser_mode="llm",
+        reasoning_mode="llm",
         knowledge_qa_mode=settings.knowledge_qa_mode,
-        backend_build_version="1.2.0",
-        prompt_version=(
-            "clinical-parser/v1.2+channel-candidate/v1.2"
-            if settings.clinical_parser_mode == "llm" and settings.reasoning_mode == "llm"
-            else (
-                "clinical-parser/v1.2"
-                if settings.clinical_parser_mode == "llm"
-                else (
-                    "channel-candidate/v1.2"
-                    if settings.reasoning_mode == "llm"
-                    else RULE_PARSER_VERSION
-                )
-            )
-        ),
+        backend_build_version="2.0.0",
+        prompt_version="clinical-v2/s1-s2-s4",
     )

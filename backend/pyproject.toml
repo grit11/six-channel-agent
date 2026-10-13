@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "six-channel-clinical-assistant"
-version = "1.2.0"
+version = "2.0.0"
 description = "六经辨证临床辅助系统后端"
 requires-python = ">=3.11"
 dependencies = [
@@ -26,14 +26,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=1", "httpx>=0.27", "black>=25", "ruff>=0.11", "mypy>=1"]
-eval = ["ragas>=0.4.3,<0.5", "langchain-core>=1,<2"]
+eval = ["ragas>=0.4.3,<0.5", "langchain-core>=1,<2", "openai>=1,<3"]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*"]
 
 [tool.setuptools.package-data]
-app = ["prompts/*.md", "static/*.html", "static/*.js", "static/*.svg"]
+app = ["prompts/*.md", "clinical_v2/prompts/*.md", "static/*.html", "static/*.js", "static/*.svg"]
 
 [tool.black]
 line-length = 100
@@ -58,3 +58,4 @@ markers = ["integration: 真实本地基础设施和图状态恢复测试"]
 python_version = "3.11"
 ignore_missing_imports = true
 check_untyped_defs = true
+

@@ -21,12 +21,12 @@ class VersionsResponse(BaseModel):
 
     protocol_version: str = Field(description="推理协议版本")
     knowledge_base_version: str = Field(description="知识库版本")
-    scoring_config_version: str = Field(description="评分配置版本")
+    scoring_config_version: str = Field(description="V2 中固定为 removed，保留字段仅用于运维兼容")
     llm_model: str = Field(description="已配置大模型名称")
     embedding_model: str = Field(description="已配置向量模型名称")
     reranker_model: str = Field(description="已配置重排模型名称")
-    clinical_parser_mode: Literal["rules", "llm"] = Field(description="临床解析运行模式")
-    reasoning_mode: Literal["rules", "llm"] = Field(description="八纲与六经候选运行模式")
+    clinical_parser_mode: Literal["llm"] = Field(description="V2 S1 仅使用结构化 LLM")
+    reasoning_mode: Literal["llm"] = Field(description="V2 S2-S4 仅使用 LLM + RAG")
     backend_build_version: str = Field(description="后端工程版本")
     prompt_version: str = Field(description="提示词版本或未实现状态")
     source_condition_version: str = Field(
@@ -54,6 +54,9 @@ class VersionsResponse(BaseModel):
 
 StreamEventName = Literal[
     "snapshot_updated",
+    "clarification_requested",
+    "review_requested",
+    "consultation_completed",
     "stage_started",
     "stage_completed",
     "stage_failed",

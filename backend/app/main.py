@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.app.api.v1.router import api_router
+from backend.app.api.v2.router import router as v2_router
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.dependencies import open_container
 from backend.app.core.exceptions import (
@@ -40,10 +41,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application = FastAPI(
         title="六经辨证临床辅助系统",
-        version="1.2.0",
+        version="2.0.0",
         description="面向临床医生的证据辅助服务，医生完成最终审核。",
         lifespan=lifespan,
     )
+    application.include_router(v2_router)
 
     @application.exception_handler(ApplicationError)
     async def application_error(request: Request, exc: ApplicationError) -> JSONResponse:
@@ -69,7 +71,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application.include_router(api_router)
     application.mount(
-        "/console-static", StaticFiles(directory=CONSOLE_HTML.parent), name="console-static"
+        "/console-static",
+        StaticFiles(directory=CONSOLE_HTML.parent),
+        name="console-static",
     )
 
     @application.get("/dashboard", include_in_schema=False)
@@ -99,25 +103,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "mode": "live",
             "demo": False,
-            "agent_connected": container.settings.consultation_storage != "disabled",
-            "consultation_enabled": container.settings.consultation_storage != "disabled",
+            "agent_connected": container.clinical_v2_service is not None,
+            "consultation_enabled": container.clinical_v2_service is not None,
             "degraded": degraded,
             "vector_backend": container.vector_store.status.backend,
             "checkpoint_backend": container.checkpoint_runtime.status.backend,
             "business_database": container.database.backend,
             "knowledge_version": container.settings.knowledge_base_version,
-            "clinical_parser_mode": container.settings.clinical_parser_mode,
-            "reasoning_mode": container.settings.reasoning_mode,
+            "clinical_engine": "clinical-v2.0",
             "knowledge_qa_mode": container.settings.knowledge_qa_mode,
             "retrieval_mode": container.settings.retrieval_mode,
             "reranker_enabled": container.settings.reranker_enabled,
             "llm_model": container.settings.llm_model,
             "counts": container.knowledge_service.counts(),
-            "console_version": "1.0",
+            "console_version": "2.0",
             "text": (
-                "真实 LangGraph 会诊服务已装配；最终结论由医生审核。"
-                if container.settings.consultation_storage != "disabled"
-                else "会诊存储已关闭，当前仅可查询知识和解析事实。"
+                "V2 LangGraph 临床图已装配；S5 医生审核是完成入口。"
+                if container.clinical_v2_service is not None
+                else "知识中心已装配；V2 临床模型尚未配置。"
             ),
         }
 

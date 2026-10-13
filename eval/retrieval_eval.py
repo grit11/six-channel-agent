@@ -22,11 +22,10 @@ async def main() -> None:
             assert evidence.content == evidence.metadata["classic_text"]
             clause_hits += 1
     pair_hits = 0
-    for number in range(1, 54):
-        rule = await service.get_differential_by_id(f"diff_v12_{number:03}")
-        assert rule is not None
-        results = await service.search_differential(rule.candidates, top_k=5)
-        pair_hits += int(any(result.rule_id == rule.rule_id for result in results))
+    for record in service.raw_documents("differential"):
+        candidates = record.metadata.get("candidates", [])
+        results = await service.search_differential(candidates, top_k=5)
+        pair_hits += int(any(result.knowledge_id == record.knowledge_id for result in results))
     print(
         json.dumps(
             {

@@ -22,8 +22,7 @@ async def main() -> None:
             {
                 "version": service.version,
                 "counts": service.counts(),
-                "fpeu_digest": service.branch_digest,
-                "fpeu_count": service.branch_count(),
+                "snapshot_digest": service.snapshot_digest,
             },
             ensure_ascii=False,
         )

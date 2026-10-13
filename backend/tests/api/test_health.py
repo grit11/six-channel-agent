@@ -35,8 +35,8 @@ def test_health_endpoints(tmp_path: Path) -> None:
         assert client.get("/api/v1/health/ready").status_code == 200
         assert client.get("/api/v1/system/versions").json()["knowledge_base_version"] == "1.2"
         versions = client.get("/api/v1/system/versions").json()
-        assert versions["clinical_parser_mode"] == "rules"
-        assert versions["reasoning_mode"] == "rules"
+        assert versions["clinical_parser_mode"] == "llm"
+        assert versions["reasoning_mode"] == "llm"
         assert versions["clinical_context_version"] == "clinical-context/v2.0"
         assert versions["relationship_version"] == "relationship/v2.0"
         assert versions["knowledge_qa_mode"] == "extractive"

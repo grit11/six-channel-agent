@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 from uuid import uuid4
 
-from pymilvus import DataType, MilvusClient
+from pymilvus import DataType, MilvusClient  # type: ignore[import-untyped]
 
 from backend.app.core.config import Settings
 from backend.app.core.exceptions import (
@@ -55,7 +55,11 @@ class VectorStorePort(Protocol):
         ...
 
     async def upsert(
-        self, documents: list[VectorDocument], profile: IndexProfile, *, rebuild: bool = False
+        self,
+        documents: list[VectorDocument],
+        profile: IndexProfile,
+        *,
+        rebuild: bool = False,
     ) -> IndexReport:
         """幂等发布完整快照，不逐批覆盖可见索引。"""
         ...
@@ -81,7 +85,10 @@ class MilvusVectorStore:
     """封装 Remote/Lite 客户端，禁止上层直接操作厂商 SDK。"""
 
     def __init__(
-        self, client: MilvusClient, status: VectorBackendStatus, settings: Settings | None = None
+        self,
+        client: MilvusClient,
+        status: VectorBackendStatus,
+        settings: Settings | None = None,
     ) -> None:
         """绑定已探测的客户端与后端状态。"""
         self._client = client
@@ -206,7 +213,9 @@ class MilvusVectorStore:
     ) -> IndexReport:
         """先完成独立暂存集合再发布指针，失败只清理本次集合，保留旧版本。"""
         validate_vectors(
-            [document.vector for document in documents], len(documents), profile.dimension
+            [document.vector for document in documents],
+            len(documents),
+            profile.dimension,
         )
         counts: Counter[str] = Counter(document.record.knowledge_type for document in documents)
         if profile.metric_type != self._settings.milvus_metric_type:
@@ -301,7 +310,11 @@ class MilvusVectorStore:
         return report
 
     async def upsert(
-        self, documents: list[VectorDocument], profile: IndexProfile, *, rebuild: bool = False
+        self,
+        documents: list[VectorDocument],
+        profile: IndexProfile,
+        *,
+        rebuild: bool = False,
     ) -> IndexReport:
         """幂等发布完整快照；显式 rebuild 写入新集合，旧集合保留供历史引用。"""
         async with self._write_lock:
@@ -368,7 +381,10 @@ class MilvusVectorStore:
             filter=expression,
             limit=top_k,
             output_fields=["record"],
-            search_params={"metric_type": self._settings.milvus_metric_type, "params": params},
+            search_params={
+                "metric_type": self._settings.milvus_metric_type,
+                "params": params,
+            },
             timeout=self._timeout,
             **self._read_options(),
         )
@@ -416,7 +432,10 @@ class MilvusVectorStore:
             return
         expression = f"version == {json.dumps(version, ensure_ascii=False)}"
         rows = self._client.query(
-            self._manifest, filter=expression, output_fields=["id", "report"], timeout=self._timeout
+            self._manifest,
+            filter=expression,
+            output_fields=["id", "report"],
+            timeout=self._timeout,
         )
         if not rows:
             return

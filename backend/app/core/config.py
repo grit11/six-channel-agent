@@ -12,8 +12,6 @@ from typing import Literal, Self
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from backend.app.schemas.reasoning import EvidenceGapPolicy, ScoringPolicy
-
 
 class Settings(BaseSettings):
     """六经辨证后端的集中配置。"""
@@ -36,14 +34,9 @@ class Settings(BaseSettings):
     llm_temperature: float = Field(default=0.1, ge=0, le=2, description="LLM 采样温度")
     llm_timeout_seconds: float = Field(default=60.0, gt=0, description="LLM 请求超时")
     llm_max_retries: int = Field(default=2, ge=0, le=5, description="LLM 有限重试次数")
-    clinical_parser_mode: Literal["rules", "llm"] = Field(
-        default="rules", description="显式选择确定性基线或结构化 LLM，不因失败静默回退"
-    )
-    reasoning_mode: Literal["rules", "llm"] = Field(
-        default="rules", description="八纲与六经候选校正模式；模型失败不静默回退"
-    )
     knowledge_qa_mode: Literal["extractive", "llm"] = Field(
-        default="extractive", description="独立 QA 来源摘录或结构化模型选择摘录；失败不静默降级"
+        default="extractive",
+        description="独立 QA 来源摘录或结构化模型选择摘录；失败不静默降级",
     )
 
     embedding_provider: str = Field(default="siliconflow", description="embedding_provider 配置值")
@@ -126,7 +119,8 @@ class Settings(BaseSettings):
 
     database_enabled: bool = Field(default=False, description="database_enabled 配置值")
     consultation_storage: Literal["disabled", "memory", "postgres"] = Field(
-        default="disabled", description="会话存储能力开关；memory 仅限开发验证，重启不保留"
+        default="disabled",
+        description="会话存储能力开关；memory 仅限开发验证，重启不保留",
     )
     consultation_run_mode: Literal["async", "sync"] = Field(
         default="async", description="异步会诊默认启用；sync 用于确定性工程回归"
@@ -162,25 +156,12 @@ class Settings(BaseSettings):
         description="五类运行时主库目录",
     )
     knowledge_base_version: str = Field(default="1.2", description="knowledge_base_version 配置值")
-    formula_branch_recall_top_n: int = Field(default=12, ge=5, le=30)
-    protocol_version: str = Field(default="1.2-six-stage", description="protocol_version 配置值")
-    scoring_config_version: str = Field(default="1.0", description="scoring_config_version 配置值")
-    scoring_policy: ScoringPolicy = Field(
-        default_factory=ScoringPolicy, description="RP-13 七因子和反证惩罚配置，环境变量为 JSON"
-    )
-    evidence_gap_policy: EvidenceGapPolicy = Field(
-        default_factory=EvidenceGapPolicy, description="RP-11 提问因子与停止阈值，环境变量为 JSON"
-    )
-    topk_channel_weight: float = Field(
-        default=0.6, ge=0, le=1, description="Top-K 基线聚合中的六经分权重，方证权重为余数"
-    )
+    protocol_version: str = Field(default="clinical-v2.0", description="V2 推理协议版本")
     top_k_default: int = Field(default=3, ge=1, le=5, description="top_k_default 配置约束")
     top_k_max: int = Field(default=5, ge=1, le=5, description="top_k_max 配置约束")
     retrieval_top_k: int = Field(default=20, ge=1, le=100, description="retrieval_top_k 配置约束")
     rerank_top_k: int = Field(default=8, ge=1, description="rerank_top_k 配置约束")
-    max_supplement_rounds: int = Field(
-        default=3, ge=0, description="max_supplement_rounds 配置约束"
-    )
+    max_clarification_rounds: int = Field(default=3, ge=0, description="S2 补证轮数上限")
     sse_heartbeat_seconds: int = Field(
         default=15, ge=1, description="sse_heartbeat_seconds 配置约束"
     )
@@ -193,6 +174,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_runtime(self) -> Self:
         """启动时验证关联配置，避免写入索引或请求执行时才暴露错误。"""
+        # V2 协议固定由代码签发，避免旧 .env 中的 V1.2 值改变运行协议。
+        self.protocol_version = "clinical-v2.0"
         if self.top_k_default > self.top_k_max:
             raise ValueError("默认 Top-K 不得超过最大 Top-K")
         if self.rerank_top_k > self.retrieval_top_k:
@@ -203,10 +186,21 @@ class Settings(BaseSettings):
             raise ValueError("向量距离必须为 COSINE、IP 或 L2")
         if self.reranker_timeout_seconds <= 0:
             raise ValueError("Reranker 超时必须大于零")
-        if min(self.milvus_hnsw_m, self.milvus_hnsw_ef_construction, self.milvus_search_ef) <= 0:
+        if (
+            min(
+                self.milvus_hnsw_m,
+                self.milvus_hnsw_ef_construction,
+                self.milvus_search_ef,
+            )
+            <= 0
+        ):
             raise ValueError("Milvus 索引和搜索参数必须大于零")
         if self.retrieval_mode != "bm25" and not all(
-            (self.embedding_base_url, self.embedding_model, self.embedding_model_version)
+            (
+                self.embedding_base_url,
+                self.embedding_model,
+                self.embedding_model_version,
+            )
         ):
             raise ValueError("Dense/Hybrid 必须配置 Embedding 地址、模型和版本")
         if self.reranker_enabled and not all((self.reranker_base_url, self.reranker_model)):
@@ -224,14 +218,6 @@ class Settings(BaseSettings):
             raise ValueError("业务数据库必须使用 PostgreSQL asyncpg URL")
         if self.consultation_storage == "postgres" and not self.database_enabled:
             raise ValueError("PostgreSQL 会话存储必须启用业务数据库")
-        if self.clinical_parser_mode == "llm" and (
-            not self.llm_model or not self.llm_base_url.startswith(("http://", "https://"))
-        ):
-            raise ValueError("LLM 解析模式必须配置 HTTP(S) 地址和模型名")
-        if self.reasoning_mode == "llm" and (
-            not self.llm_model or not self.llm_base_url.startswith(("http://", "https://"))
-        ):
-            raise ValueError("结构化推理模式必须配置 HTTP(S) 地址和模型名")
         if self.knowledge_qa_mode == "llm" and (
             not self.llm_model or not self.llm_base_url.startswith(("http://", "https://"))
         ):

@@ -13,7 +13,7 @@ from backend.app.persistence.database import open_database
 async def test_disabled_business_database() -> None:
     """关闭业务数据库时不创建 ORM Engine，不假装历史记录可用。"""
     with patch("backend.app.persistence.database.create_async_engine") as factory:
-        runtime = await open_database(Settings())
+        runtime = await open_database(Settings(_env_file=None))
         assert runtime.backend == "disabled"
         assert runtime.engine is None
         factory.assert_not_called()

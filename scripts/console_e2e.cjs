@@ -57,45 +57,23 @@ async function ready() {
   throw new Error('Isolated API did not start');
 }
 
-/** 补证同步/异步返回均须保持会诊线程、提升版本；202 只能代表运行中。 */
-async function acceptedEvidence(response,previous) {
-  assert.ok([200,202].includes(response.status()),`Evidence HTTP ${response.status()}`);
-  const snapshot=await response.json();
-  assert.equal(snapshot.consultation_id,previous.consultation_id);
-  assert.equal(snapshot.thread_id,previous.thread_id);
-  assert.ok(snapshot.turn>previous.turn,'Supplement must advance the snapshot version');
-  if(response.status()===202) assert.equal(snapshot.status,'running');
-  else assert.ok(['needs_evidence','awaiting_doctor_review'].includes(snapshot.status));
-  return snapshot;
-}
-
-/** 等待新轮权威快照和页面版本同时就绪，避免审核旧轮候选或把受理当完成。 */
-async function waitForEvidenceResult(page,id,minTurn) {
-  const deadline=Date.now()+60000;
-  let lastStatus='not_read';
-  while(Date.now()<deadline) {
-    // 网络轮询在 Node 侧完成，避免跨浏览器异步 JSHandle 返回 Promise 而非快照。
-    const response=await page.request.get(`${base}/api/v1/consultations/${encodeURIComponent(id)}`,{timeout:10000});
-    assert.equal(response.status(),200,'Authoritative snapshot must be available');
+/** 等待业务快照进入指定暂停或终态，同时要求页面采用同一状态。 */
+async function settled(page,id,status) {
+  for(let n=0;n<120;n++) {
+    const response=await page.request.get(`${base}/api/v2/consultations/${id}`);
+    assert.equal(response.status(),200);
     const snapshot=await response.json();
-    assert.equal(snapshot.consultation_id,id);
-    lastStatus=`${snapshot.status} / turn ${snapshot.turn}`;
-    if(['failed','cancelled','safety_escalated'].includes(snapshot.status)) throw new Error(`Supplement ended: ${lastStatus}`);
-    if(snapshot.turn>=minTurn && ['needs_evidence','awaiting_doctor_review'].includes(snapshot.status)) {
-      // DOM 检查同步返回布尔值；只有医生操作合法且页面已显示当前版时才交回快照。
-      const displayed=await page.evaluate(turn=>{
-        const session=document.getElementById('sessionInfo');
-        const accept=document.getElementById('acceptBtn');
-        return Boolean(session?.textContent.includes(`第 ${turn} 版`) && accept && !accept.disabled);
-      },snapshot.turn);
-      if(displayed) return snapshot;
+    if(snapshot.status==='failed') throw new Error(`Clinical failed: ${snapshot.failure_code}`);
+    if(snapshot.status===status) {
+      await page.waitForFunction(expected=>document.getElementById('resultState').textContent===expected,status);
+      return snapshot;
     }
     await page.waitForTimeout(500);
   }
-  throw new Error(`Supplement did not settle within 60 seconds: ${lastStatus}`);
+  throw new Error(`Snapshot did not reach ${status}`);
 }
 
-/** 验证关键纵向流程并保存桌面/移动截图；所有候选来自真实后端。 */
+/** 真实 V2 五阶段、补证、审核、来源、刷新与 S2 未决浏览器回归。 */
 async function main() {
   const {chromium}=playwright();
   const external=process.env.E2E_EXTERNAL_SERVERS==='true';
@@ -103,56 +81,64 @@ async function main() {
   let browser;
   try {
     await ready();
-    const options=browserOptions();
-    console.log(`Browser: ${options.channel || options.executablePath || 'Playwright Chromium'}`);
-    browser=await chromium.launch(options);
+    browser=await chromium.launch(browserOptions());
     const page=await browser.newPage({viewport:{width:1600,height:1000}});
     const errors=[];page.on('pageerror',error=>errors.push(error.message));
     await page.goto(`${base}/dashboard`);
     await page.waitForFunction(()=>!document.getElementById('startBtn').disabled);
-    await page.locator('#clinicalText').fill('患者往来寒热，胸胁苦满，口苦，咽干，目眩，脉弦。');
+    await page.locator('#clinicalText').fill('发热，汗出，头痛，脉浮缓。');
     await page.locator('#parseBtn').click();
-    await page.locator('[data-fact-index]').first().waitFor();
+    await page.locator('[data-polarity]').first().waitFor();
     await page.locator('#startBtn').click();
-    await page.locator('.result-card').first().waitFor({timeout:60000});
-    assert.equal(await page.locator('#stageRow .step').count(),6);
-    assert.equal(await page.locator('#stageRow .step').last().locator('.step-dot').innerText(),'6');
+    await page.locator('[data-path]').first().waitFor({timeout:60000});
     const id=new URL(page.url()).searchParams.get('consultation');assert.ok(id);
-    await page.locator('.source-item').first().click();
-    assert.ok(await page.locator('#drawerBody').innerText());await page.locator('#closeDrawer').click();
-    await page.locator('#factsEditor').evaluate(el=>el.open=true);
-    const first=page.locator('[data-fact-index]').first();await first.selectOption('unknown');
-    await page.waitForTimeout(3000);assert.equal(await first.inputValue(),'unknown');
-    await page.reload();await page.locator('.result-card').first().waitFor();
-    const previous=await (await page.request.get(`${base}/api/v1/consultations/${id}`)).json();
-    await page.locator('#extraEvidence').fill('无呕吐，脉弦，无汗。');
-    const evidence=page.waitForResponse(r=>r.url().endsWith('/evidence')&&r.request().method()==='POST');
-    await page.locator('#addEvidence').click();
-    const accepted=await acceptedEvidence(await evidence,previous);
+    const first=await settled(page,id,'awaiting_doctor_review');
+    assert.equal(await page.locator('#stageRow .step').count(),5);
+    assert.equal(await page.locator('#stageRow .step').last().locator('.step-dot').innerText(),'5');
+    assert.equal(first.protocol_version,'clinical-v2.0');
+    assert.equal(first.paused_at,'s5_doctor_review');
+    assert.ok(first.retrieval.formula_candidates.length<=5);
+    assert.ok(first.comparison.ordered_paths.length<=3);
+    assert.equal(first.comparison.ordered_paths[0].verification_status,'grounded');
+    await page.locator('[data-source]').first().click();
+    await page.locator('#drawer.visible').waitFor();
+    assert.ok((await page.locator('#drawerBody').innerText()).length>0);
+    await page.locator('#closeDrawer').click();
+    await page.reload();await page.locator('[data-path]').first().waitFor();
     assert.equal(new URL(page.url()).searchParams.get('consultation'),id);
-    const settled=await waitForEvidenceResult(page,id,accepted.turn);
-    assert.equal(settled.thread_id,previous.thread_id);
-    assert.ok(settled.clinical_evidence.findings.some(f=>f.key==='vomiting'&&f.polarity==='negative'));
-    const review=page.waitForResponse(r=>r.url().endsWith('/review')&&r.request().method()==='POST');
+    await page.locator('#extraEvidence').fill('今天仍发热。');
+    await page.locator('#addEvidence').click();
+    await page.waitForFunction(()=>document.getElementById('sessionInfo').textContent.includes('revision 1'));
+    const supplemented=await settled(page,id,'awaiting_doctor_review');
+    assert.equal(supplemented.thread_id,first.thread_id);
+    assert.equal(supplemented.revision,1);
+    assert.ok(supplemented.turn>first.turn);
     await page.locator('#acceptBtn').click();
-    const reviewResponse=await review;assert.equal(reviewResponse.status(),200);
-    const reviewed=await reviewResponse.json();
-    assert.equal(reviewed.consultation_id,id);
-    assert.equal(reviewed.status,'completed');
-    assert.equal(reviewed.doctor_review.action,'accept');
-    await page.waitForFunction(()=>document.querySelector('#stageRow .step:last-child').classList.contains('finished'));
-    assert.deepEqual(reviewed.reasoning.completed_stages, ['clinical_parser','six_channel_screen','formula_branch_retrieval','differential_verification','evidence_topk']);
-    // 全量验收将截图关联到本次报告，单独执行时写入统一测试资料目录。
+    const complete=await settled(page,id,'completed');
+    assert.equal(complete.doctor_review.action,'accept');
+    assert.equal(complete.review_history.length,1);
+    assert.equal(await page.locator('#stageRow .step.finished').count(),5);
     const artifacts=path.resolve(process.env.CONSOLE_TEST_ARTIFACTS || path.join(root,'..','Console版本测试文件'));
     const output=path.resolve(process.env.CONSOLE_E2E_OUTPUT || path.join(artifacts,'screenshots'));
     fs.mkdirSync(output,{recursive:true});
-    await page.screenshot({path:path.join(output,'desktop.png'),fullPage:true});
+    await page.screenshot({path:path.join(output,'v2-desktop.png'),fullPage:true});
     await page.setViewportSize({width:390,height:844});
-    const overflow=await page.evaluate(()=>Array.from(document.querySelectorAll('body *')).filter(el=>el.getBoundingClientRect().right>window.innerWidth+1).map(el=>({tag:el.tagName,id:el.id,class:el.className,right:el.getBoundingClientRect().right})).slice(0,15));
-    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1),JSON.stringify(overflow));
-    await page.screenshot({path:path.join(output,'mobile.png'),fullPage:true});
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1),'Mobile overflow');
+    await page.screenshot({path:path.join(output,'v2-mobile.png'),fullPage:true});
     await page.locator('[data-nav="history"]').click();await page.locator('[data-history]').first().waitFor();
-    assert.deepEqual(errors,[]);console.log('Native Console E2E passed');
+    await page.setViewportSize({width:1600,height:1000});
+    await page.goto(`${base}/dashboard`);
+    await page.waitForFunction(()=>!document.getElementById('startBtn').disabled);
+    await page.locator('#clinicalText').fill('难受');await page.locator('#startBtn').click();
+    await page.waitForFunction(()=>document.getElementById('resultState').textContent==='needs_evidence');
+    const unknownId=new URL(page.url()).searchParams.get('consultation');assert.ok(unknownId);
+    const unknown=await settled(page,unknownId,'needs_evidence');
+    assert.equal(unknown.paused_at,'s2_clarification');assert.equal(unknown.retrieval,null);
+    await page.reload();await page.waitForFunction(()=>!document.getElementById('deferBtn').disabled);
+    await page.locator('#deferBtn').click();
+    assert.equal((await settled(page,unknownId,'undetermined')).comparison,null);
+    assert.deepEqual(errors,[]);console.log('V2 Native Console E2E passed');
   } finally {if(browser)await browser.close();if(server)server.kill();}
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});
+

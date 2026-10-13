@@ -6,7 +6,7 @@
 
 from backend.app.agents.knowledge_qa_agent import KnowledgeQAAgent
 from backend.app.core.exceptions import KnowledgeNotFoundError
-from backend.app.graph.main_graph import KnowledgeGraphState, build_knowledge_main_graph
+from backend.app.graph.knowledge_graph import KnowledgeGraphState, build_knowledge_graph
 from backend.app.knowledge.service import KnowledgeService
 from backend.app.schemas.evidence import Evidence
 from backend.app.schemas.knowledge import KnowledgeQARequest, KnowledgeQAResponse
@@ -18,7 +18,7 @@ class KnowledgeQAService:
     def __init__(self, knowledge: KnowledgeService, agent: KnowledgeQAAgent) -> None:
         """复用应用级知识边界并编译无临床状态的主图分支。"""
         self.knowledge = knowledge
-        self.graph = build_knowledge_main_graph(agent)
+        self.graph = build_knowledge_graph(agent)
 
     async def ask(self, request: KnowledgeQARequest) -> KnowledgeQAResponse:
         """每个知识问题独立执行，主动 context_text 也不会解析为患者事实。"""

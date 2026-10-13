@@ -197,19 +197,27 @@ class PostgresConsultationRepository:
                 created_at=snapshot.updated_at,
             )
         )
-        if snapshot.reasoning is not None and snapshot.status != "running":
-            for path in snapshot.reasoning.reasoning_paths:
+        if snapshot.comparison is not None and snapshot.status != "running":
+            for path in snapshot.comparison.ordered_paths:
                 session.add(
                     ReasoningPathModel(
                         id=uuid4(),
                         consultation_id=snapshot.consultation_id,
                         turn=snapshot.turn,
                         path_id=path.path_id,
-                        rank=path.rank,
+                        rank=path.rank or 0,
                         payload=path.model_dump(mode="json"),
                     )
                 )
-            catalog = snapshot.reasoning.evidence_catalog
+            catalog = (
+                [
+                    ref
+                    for candidate in snapshot.retrieval.formula_candidates
+                    for ref in candidate.source_evidence
+                ]
+                if snapshot.retrieval
+                else []
+            )
             # 实机复现：大 JSONB 证据的 asyncpg executemany 会停在协议写入。
             # 显式多行 VALUES 避开该路径；按 100 条分批限制参数数目，仍绑定参数、
             # 保留完整原文且共用业务事务，任一批失败会整体回滚，绝不截断证据。

@@ -2,7 +2,8 @@
 
 from fastapi import APIRouter, Request
 
-from backend.app.schemas.evidence import DifferentialRule, Evidence
+from backend.app.core.exceptions import KnowledgeNotFoundError, KnowledgeRetrievalError
+from backend.app.schemas.evidence import Evidence
 from backend.app.schemas.knowledge import (
     CaseSearchRequest,
     ClassicSearchRequest,
@@ -14,6 +15,18 @@ from backend.app.schemas.knowledge import (
 )
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
+
+
+@router.get("/evidence/{evidence_id}", response_model=Evidence)
+async def get_evidence(request: Request, evidence_id: str) -> Evidence:
+    """精确回查临床引用，不用搜索命中替代不存在的来源。"""
+    try:
+        items = await request.app.state.container.knowledge_service.get_evidence_by_ids(
+            [evidence_id]
+        )
+    except KnowledgeRetrievalError as exc:
+        raise KnowledgeNotFoundError("精确来源不存在于当前知识快照") from exc
+    return items[0]
 
 
 @router.post("/qa", response_model=KnowledgeQAResponse)
@@ -61,12 +74,12 @@ async def search_formula(request: Request, payload: FormulaSearchRequest) -> lis
     )
 
 
-@router.post("/differential", response_model=list[DifferentialRule])
-@router.post("/search/differential", response_model=list[DifferentialRule])
+@router.post("/differential", response_model=list[Evidence])
+@router.post("/search/differential", response_model=list[Evidence])
 async def search_differential(
     request: Request, payload: DifferentialSearchRequest
-) -> list[DifferentialRule]:
-    """查询原始鉴别规则，不由 API 层生成或改写 decision_rules。"""
+) -> list[Evidence]:
+    """查询原始鉴别来源，不由 API 层生成或改写临床结论。"""
     return await request.app.state.container.knowledge_service.search_differential(
         payload.candidates, payload.query, payload.top_k
     )

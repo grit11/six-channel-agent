@@ -58,10 +58,10 @@ async def test_formula_scope_and_risk(service: KnowledgeService) -> None:
 async def test_differential_pair_priority(service: KnowledgeService) -> None:
     """候选对顺序不影响精确优先，同一规则不重复返回。"""
     rules = await service.search_differential(["麻黄汤证", "桂枝汤证"])
-    assert rules[0].rule_id == "diff_v12_001"
+    assert rules[0].knowledge_id == "diff_v12_001"
     assert rules[0].retrieval_method == "candidate_pair_exact"
-    assert "汗" in rules[0].key_dimensions
-    assert len({r.rule_id for r in rules}) == len(rules)
+    assert "汗" in str(rules[0].metadata.get("key_dimensions", {}))
+    assert len({r.knowledge_id for r in rules}) == len(rules)
 
 
 @pytest.mark.asyncio

@@ -52,7 +52,7 @@ def acceptance_environment(run_dir: Path) -> dict[str, str]:
 
 
 def build_checks(run_dir: Path, runtime_dir: Path | None = None) -> list[Check]:
-    """定义后端、知识、离线纵向切片及前端六类质量门槛，不读取部署凭据。"""
+    """定义 V2 后端、知识、静态和浏览器质量门槛。"""
     python = sys.executable
     runtime_dir = runtime_dir or run_dir
     checks = [
@@ -81,9 +81,9 @@ def build_checks(run_dir: Path, runtime_dir: Path | None = None) -> list[Check]:
                 "--config-file",
                 "backend/pyproject.toml",
                 "backend/app",
-                "scripts/engineering_acceptance.py",
-                "eval/system_eval.py",
-                "eval/workflow_acceptance.py",
+                "scripts/check_v2_config.py",
+                "eval/v2_online_eval.py",
+                "eval/v2_ragas_eval.py",
             ],
             ROOT,
         ),
@@ -109,30 +109,16 @@ def build_checks(run_dir: Path, runtime_dir: Path | None = None) -> list[Check]:
         Check("knowledge", [python, str(ROOT / "scripts/validate_knowledge.py")], run_dir),
         Check("retrieval", [python, str(ROOT / "eval/retrieval_eval.py")], run_dir),
         Check(
-            "evaluation",
+            "config",
             [
                 python,
-                str(ROOT / "eval/system_eval.py"),
-                "--offline",
-                "--dataset",
-                str(ROOT / "eval/datasets/engineering_cases.jsonl"),
-                "--output",
-                str(run_dir / "evaluation.json"),
+                str(ROOT / "scripts/check_v2_config.py"),
+                "--env-file",
+                str(ROOT / ".env.example"),
             ],
-            run_dir,
-        ),
-        Check(
-            "workflow",
-            [
-                python,
-                str(ROOT / "eval/workflow_acceptance.py"),
-                "--workdir",
-                str(runtime_dir / "workflow"),
-            ],
-            run_dir,
+            ROOT,
         ),
     ]
-    # 原生页面不需要 npm 构建；Node 仅用于语法检查和浏览器回归。
     node = shutil.which("node") or "node"
     for name in ("console", "labels"):
         checks.append(
@@ -208,9 +194,9 @@ def write_report(run_dir: Path, results: list[dict[str, object]], expected: int)
     """每项后刷新可审阅报告，进程中断时已完成检查仍可追查。"""
     passed = all_passed(results, expected)
     report = {
-        "version": "engineering-acceptance/v1.2",
+        "version": "engineering-acceptance/v2.0",
         "generated_at": datetime.now(UTC).isoformat(),
-        "scope": "V1.2 五自动阶段与 S6 医生审核工程验收；非临床或实机部署验收",
+        "scope": "V2 S1–S5 与医生审核工程验收；非临床或实机部署验收",
         "python": sys.executable,
         "expected_checks": expected,
         "overall_passed": passed,
@@ -225,7 +211,7 @@ def write_report(run_dir: Path, results: list[dict[str, object]], expected: int)
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     lines = [
-        "# V1.2 六阶段工程验收报告",
+        "# V2 五阶段工程验收报告",
         "",
         str(report["scope"]),
         "",
@@ -245,7 +231,7 @@ def write_report(run_dir: Path, results: list[dict[str, object]], expected: int)
 
 def main() -> int:
     """创建独立运行目录并执行全部检查，部分执行只用于定位问题。"""
-    parser = argparse.ArgumentParser(description="V1.2 全量工程验收与逐项报告")
+    parser = argparse.ArgumentParser(description="V2 全量工程验收与逐项报告")
     parser.add_argument("--only", nargs="+", help="只运行指定检查；其余标记 not_run")
     parser.add_argument(
         "--output-dir",

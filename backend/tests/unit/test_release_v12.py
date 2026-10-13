@@ -1,4 +1,4 @@
-"""V1.2 发布整理回归：验证版本、验收范围与合并后的重排探测。
+"""V2 发布整理回归：验证版本、验收范围与合并后的重排探测。
 
 依赖真实知识和假重排器，不访问在线服务或用户数据库，不评价医学准确率。
 """
@@ -82,7 +82,7 @@ async def test_probe_rejects_modified_sources() -> None:
 def test_release_version_and_acceptance_scope(tmp_path: Path) -> None:
     """包与应用版本一致，验收范围包含 S6 医生审核。"""
     metadata = tomllib.loads((ROOT / "backend/pyproject.toml").read_text(encoding="utf-8"))
-    assert create_app(Settings(_env_file=None)).version == metadata["project"]["version"] == "1.2.0"
+    assert create_app(Settings(_env_file=None)).version == metadata["project"]["version"] == "2.0.0"
     write_report(tmp_path, [{"name": "fixture", "status": "passed"}], 1)
     report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
     assert "医生审核" in report["scope"]

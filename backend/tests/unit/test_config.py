@@ -13,7 +13,7 @@ from backend.app.core.config import Settings
 def test_default_settings_use_local_fallbacks() -> None:
     """默认配置应允许本地开发使用自动降级。"""
 
-    settings = Settings()
+    settings = Settings(_env_file=None)
     assert settings.milvus_mode == "auto"
     assert settings.milvus_fallback_to_lite is True
     assert settings.checkpoint_backend == "auto"
@@ -24,7 +24,7 @@ def test_top_k_is_bounded() -> None:
     """Top-K 超出协议允许范围时必须在配置阶段失败。"""
 
     with pytest.raises(ValidationError):
-        Settings(top_k_default=6)
+        Settings(_env_file=None, top_k_default=6)
 
 
 @pytest.mark.parametrize(
@@ -41,11 +41,13 @@ def test_top_k_is_bounded() -> None:
 def test_invalid_runtime_configuration(values: dict[str, object]) -> None:
     """启动时拒绝不一致配置，避免节点执行时才出现模糊错误。"""
     with pytest.raises(ValidationError):
-        Settings(**values)
+        Settings(_env_file=None, **values)
 
 
 def test_secrets_are_redacted() -> None:
     """配置对象展示不能泄露模型密钥或数据库密码。"""
-    settings = Settings(llm_api_key="private-key", database_url="postgresql://private-password")
+    settings = Settings(
+        _env_file=None, llm_api_key="private-key", database_url="postgresql://private-password"
+    )
     assert "private-key" not in repr(settings)
     assert "private-password" not in repr(settings)

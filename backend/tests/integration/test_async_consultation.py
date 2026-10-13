@@ -1,64 +1,63 @@
-"""异步会诊 API 回归：立即接受、状态快照、同线程补证 202 与完成审核。"""
+"""V2 后台任务集成：提交后重建运行协调器，恢复已提交任务。"""
 
-import time
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from backend.app.core.config import Settings
-from backend.app.main import create_app
-
-
-def wait_snapshot(client: TestClient, path: str) -> dict:
-    """按有界期限获取任务结果，不用固定延时假定任务完成。"""
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        snapshot = client.get(path).json()
-        if snapshot["status"] != "running":
-            return snapshot
-        time.sleep(0.02)
-    raise AssertionError("异步会诊未在期限内离开 running")
+from backend.app.persistence.repositories import InMemoryConsultationRepository
+from backend.app.schemas.runtime import RunJob
+from backend.app.services.clinical_v2_service import ClinicalV2Service
+from backend.app.services.consultation_service import ConsultationService
+from backend.app.services.runtime_service import ReliableRuntime
+from backend.tests.v2.test_end_to_end_workflow import FakeKnowledge, FullLLM
 
 
-def test_async_create_supplement_and_review(tmp_path: Path) -> None:
-    """201 返回运行态，后续补证 202；结果与审核通过权威快照恢复。"""
-    settings = Settings(
-        _env_file=None,
-        consultation_storage="memory",
-        consultation_run_mode="async",
-        milvus_mode="lite",
-        milvus_lite_path=str(tmp_path / "vector.db"),
-        checkpoint_backend="sqlite",
-        langgraph_sqlite_path=str(tmp_path / "graph.db"),
-    )
-    with TestClient(create_app(settings)) as client:
-        response = client.post(
-            "/api/v1/consultations", json={"clinical_text": "发热，无汗，恶寒，身痛，喘，脉浮"}
-        )
-        assert response.status_code == 201
-        accepted = response.json()
-        assert accepted["status"] == "running" and accepted["reasoning"] is None
-        path = "/api/v1/consultations/" + accepted["consultation_id"]
-        result = wait_snapshot(client, path)
-        assert result["status"] == "needs_evidence"
-        supplement = client.post(
-            path + "/evidence",
-            json={
-                "clinical_text": "无汗，脉浮紧",
-                "expected_turn": result["turn"],
-            },
-        )
-        assert supplement.status_code == 202
-        assert supplement.json()["reasoning"] is None
-        updated = wait_snapshot(client, path)
-        assert updated["thread_id"] == accepted["thread_id"]
-        assert updated["reasoning"]["reasoning_paths"]
-        reviewed = client.post(
-            path + "/review",
-            json={
-                "action": "accept",
-                "expected_turn": updated["turn"],
-                "selected_path_id": updated["reasoning"]["reasoning_paths"][0]["path_id"],
-            },
-        )
-        assert reviewed.status_code == 200 and reviewed.json()["status"] == "completed"
+async def test_committed_job_survives_worker_restart(tmp_path: Path) -> None:
+    """调度实例重建后执行同一个持久意图，不创建第二个会诊。"""
+    repository = InMemoryConsultationRepository()
+    llm = FullLLM()
+    async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "state.db")) as saver:
+        service = ConsultationService(repository, ClinicalV2Service(llm, saver, FakeKnowledge()))
+        first = ReliableRuntime(service)
+        service.runtime = first
+        # 模拟提交成功但进程来不及启动任务；不修改业务状态为假成功。
+        first.launch = lambda job: None
+        running = await service.create("发热")
+        assert running.status == "running"
+        raw = (await repository.runtime.scan("job"))[0]
+        second = ReliableRuntime(service)
+        service.runtime = second
+        result = await second.execute(RunJob.model_validate(raw))
+        assert result.status == "awaiting_doctor_review"
+        assert result.consultation_id == running.consultation_id
+        assert len(llm.calls) == 3
+        await second.execute(RunJob.model_validate(raw))
+        assert len(llm.calls) == 3
+
+
+async def test_checkpoint_result_recovers_after_business_publish_failure(tmp_path: Path) -> None:
+    """跨库发布故障后重试不重复模型调用，并最终发布权威快照。"""
+    repository = InMemoryConsultationRepository()
+    llm = FullLLM()
+    async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "state.db")) as saver:
+        service = ConsultationService(repository, ClinicalV2Service(llm, saver, FakeKnowledge()))
+        runtime = ReliableRuntime(service)
+        service.runtime = runtime
+        runtime.launch = lambda job: None
+        running = await service.create("发热")
+        raw = (await repository.runtime.scan("job"))[0]
+        original = repository.save
+
+        async def fail(*args, **kwargs):
+            raise RuntimeError("publish interrupted")
+
+        repository.save = fail
+        import pytest
+
+        with pytest.raises(RuntimeError):
+            await runtime.execute(RunJob.model_validate(raw))
+        repository.save = original
+        result = await runtime.execute(RunJob.model_validate(raw))
+        assert result.status == "awaiting_doctor_review"
+        assert result.consultation_id == running.consultation_id
+        assert len(llm.calls) == 3
