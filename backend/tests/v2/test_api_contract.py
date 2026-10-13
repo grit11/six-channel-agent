@@ -85,6 +85,17 @@ def test_v2_api_parse_pause_review_and_sse(tmp_path: Path) -> None:
         assert "review_requested" in {e["event"] for e in event_rows}
         stages = {e["payload"].get("stage") for e in event_rows if e["event"] == "stage_completed"}
         assert {"s1_extract", "s2_localize", "s3_retrieve", "s4_compare"} <= stages
+        assert all(
+            e["payload"]["duration_ms"] >= 0 for e in event_rows if e["event"] == "stage_completed"
+        )
+        page_url = f"/api/v2/consultations/{identifier}/events/page"
+        assert client.get(page_url).json() == event_rows
+        assert (
+            client.get(page_url, params={"after": event_rows[0]["event_id"]}).json()
+            == event_rows[1:]
+        )
+        assert client.get(page_url, params={"after": f"{uuid4()}:1"}).status_code == 400
+        assert client.get(f"/api/v2/consultations/{uuid4()}/events/page").status_code == 404
         last_id = event_rows[-1]["event_id"]
         assert (
             client.get(
@@ -102,12 +113,29 @@ def test_v2_api_parse_pause_review_and_sse(tmp_path: Path) -> None:
         command = {**malformed, "action_id": "accept", "review": {"action": "accept"}}
         completed = client.post(f"/api/v2/consultations/{identifier}/review", json=command).json()
         assert completed["status"] == "completed" and len(completed["review_history"]) == 1
+        saved_events = client.get(page_url).json()
+        assert len({e["event_id"] for e in saved_events}) == len(saved_events)
+        assert any(e["event"] == "consultation_completed" for e in saved_events)
         assert (
             client.post(
                 f"/api/v2/consultations/{identifier}/review", json={**command, "action_id": "stale"}
             ).status_code
             == 409
         )
+
+        async def append_public_events() -> None:
+            """隔离存储追加无病例的事件，验证 API 分页边界与尾游标。"""
+            from uuid import UUID
+
+            for _ in range(105):
+                await service.repository.runtime.emit(UUID(identifier), 1, "heartbeat", {})
+
+        client.portal.call(append_public_events)
+        first_page = client.get(page_url).json()
+        assert len(first_page) == 100
+        next_page = client.get(page_url, params={"after": first_page[-1]["event_id"]}).json()
+        assert next_page and next_page[0]["sequence"] > first_page[-1]["sequence"]
+        assert client.get(page_url, params={"after": next_page[-1]["event_id"]}).json() == []
 
 
 async def test_v2_sse_cursor_at_pause_finishes(tmp_path: Path) -> None:

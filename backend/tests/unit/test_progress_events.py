@@ -29,8 +29,8 @@ async def test_model_validation_failure_and_concurrent_scope_isolation() -> None
 
     async def fail() -> None:
         """模拟返回内容未通过响应 Schema 校验。"""
-        async with progress_scope(sink_first), stage_scope("eight_principles"):
-            with pytest.raises(ValueError):
+        with pytest.raises(ValueError):
+            async with progress_scope(sink_first), stage_scope("eight_principles"):
                 async with model_scope("chat"):
                     await asyncio.sleep(0)
                     raise ValueError("内部响应不能输出")
@@ -45,10 +45,33 @@ async def test_model_validation_failure_and_concurrent_scope_isolation() -> None
             await asyncio.sleep(0)
 
     await asyncio.gather(fail(), succeed())
-    assert [item[0] for item in first] == ["model_started", "model_failed"]
+    assert [item[0] for item in first] == ["model_started", "model_failed", "stage_failed"]
     assert [item[0] for item in second] == ["model_started", "model_completed"]
     assert all(item[1]["stage"] == "eight_principles" for item in first)
     assert all(item[1]["stage"] == "channel_candidates" for item in second)
     assert "内部响应" not in str(first)
     await emit_progress("stage_started", {"stage": "outside"})
-    assert len(first) == len(second) == 2
+    assert first[-1][1]["duration_ms"] >= 0
+    assert len(first) == 3 and len(second) == 2
+
+
+async def test_stage_timing_and_usage_are_preserved() -> None:
+    """阶段耗时独立于模型耗时，供应商真实 usage 保留；上下文退出不泄漏阶段。"""
+    events: list[tuple[str, dict[str, object]]] = []
+
+    async def sink(event: StreamEventName, payload: dict[str, object]) -> None:
+        """收集注入的公开事件，不记录模型正文。"""
+        events.append((event, payload))
+
+    async with progress_scope(sink):
+        async with stage_scope("s1_extract"):
+            await emit_progress("stage_started", {})
+            async with model_scope("chat") as usage:
+                usage.update(usage_status="available", prompt_tokens=12, completion_tokens=8)
+                await asyncio.sleep(0.01)
+            await emit_progress("stage_completed", {})
+        await emit_progress("stage_completed", {})
+    assert events[2][1]["prompt_tokens"] == 12
+    assert events[2][1]["completion_tokens"] == 8
+    assert events[3][1]["duration_ms"] >= events[2][1]["duration_ms"]
+    assert events[-1][1]["stage"] is None and "duration_ms" not in events[-1][1]

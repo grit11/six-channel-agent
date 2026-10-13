@@ -20,6 +20,7 @@ from backend.app.core import dependencies
 from backend.app.core.config import Settings
 from backend.app.core.ports import StructuredLLM
 from backend.app.main import create_app
+from backend.app.observability.progress import model_scope
 from backend.tests.v2.test_end_to_end_workflow import FullLLM
 from backend.tests.v2.test_s2_hitl_resume import UncertainLLM
 
@@ -31,12 +32,15 @@ class BrowserFixtureLLM(FullLLM):
 
     async def ainvoke_structured(self, messages: list[dict[str, str]], schema: type[T]) -> T:
         """已知测试输入走对应夹具，其他临床语义不在此处实现。"""
-        payload = json.loads(messages[-1]["content"])
-        if schema is S1ExtractionDraft and payload["clinical_text"] == "难受":
-            return await UncertainLLM().ainvoke_structured(messages, schema)
-        if schema is ChannelLocalizationV2 and payload["raw_text"] == "难受":
-            return await UncertainLLM().ainvoke_structured(messages, schema)
-        return await super().ainvoke_structured(messages, schema)
+        # 仅浏览器工程夹具使用可识别的合成用量，生产仍以供应商 usage 为准。
+        async with model_scope("chat") as usage:
+            usage.update(usage_status="available", prompt_tokens=100, completion_tokens=20)
+            payload = json.loads(messages[-1]["content"])
+            if schema is S1ExtractionDraft and payload["clinical_text"] == "难受":
+                return await UncertainLLM().ainvoke_structured(messages, schema)
+            if schema is ChannelLocalizationV2 and payload["raw_text"] == "难受":
+                return await UncertainLLM().ainvoke_structured(messages, schema)
+            return await super().ainvoke_structured(messages, schema)
 
 
 @asynccontextmanager

@@ -14,6 +14,7 @@ from backend.app.schemas.events import StreamEventName
 ProgressSink = Callable[[StreamEventName, dict[str, object]], Awaitable[None]]
 _sink: ContextVar[ProgressSink | None] = ContextVar("consultation_progress", default=None)
 _stage: ContextVar[str | None] = ContextVar("consultation_stage", default=None)
+_stage_started: ContextVar[float | None] = ContextVar("stage_started", default=None)
 
 
 @asynccontextmanager
@@ -28,11 +29,16 @@ async def progress_scope(sink: ProgressSink) -> AsyncIterator[None]:
 
 @asynccontextmanager
 async def stage_scope(stage: str) -> AsyncIterator[None]:
-    """标注当前协议节点，检索/模型事件只附固定阶段名。"""
+    """隔离阶段与单调时钟；仅自动执行耗时，不把人工等待计入推理。"""
     token = _stage.set(stage)
+    clock_token = _stage_started.set(perf_counter())
     try:
         yield
+    except Exception as exc:
+        await emit_progress("stage_failed", {"error_type": type(exc).__name__})
+        raise
     finally:
+        _stage_started.reset(clock_token)
         _stage.reset(token)
 
 
@@ -40,7 +46,11 @@ async def emit_progress(event: StreamEventName, payload: dict[str, object]) -> N
     """等待事件落库后继续执行；持久化失败不能假装进度已发布。"""
     sink = _sink.get()
     if sink is not None:
-        await sink(event, {**payload, "stage": _stage.get()})
+        public = {**payload, "stage": _stage.get()}
+        started = _stage_started.get()
+        if event in {"stage_completed", "stage_failed"} and started is not None:
+            public["duration_ms"] = int((perf_counter() - started) * 1000)
+        await sink(event, public)
 
 
 @asynccontextmanager
