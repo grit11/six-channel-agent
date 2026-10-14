@@ -71,13 +71,23 @@ class ReliableRuntime:
 
     @staticmethod
     def _log(identifier: UUID | None, error: BaseException | None) -> None:
+        """记录可定位的失败分类；严禁写入密钥、病例正文或模型输出。"""
+        details = getattr(error, "details", {}) if error is not None else {}
+        if not isinstance(details, dict):
+            details = {}
         logging.getLogger("six_channel").error(
             "v2_runtime_error consultation_id=%s thread_id=clinical-v2:%s "
-            "request_id=%s cause_type=%s",
+            "request_id=%s cause_type=%s failure_code=%s error_category=%s "
+            "http_status=%s stage=%s error_message=%s",
             identifier,
             identifier,
             None,
             type(error).__name__,
+            details.get("failure_code") or getattr(error, "code", None),
+            details.get("error_category"),
+            details.get("http_status"),
+            details.get("stage"),
+            getattr(error, "message", None),
         )
 
     async def _loop(self) -> None:
@@ -167,12 +177,23 @@ class ReliableRuntime:
                     else exc.code if isinstance(exc, ApplicationError) else "RUN_FAILED"
                 )
                 job.result = None
-                if self.service.workflow is not None:
-                    job.result = await self.service.workflow.s4_failure_result(
-                        str(job.consultation_id),
-                        str(failure_code),
-                        retry_count=current.s4_retry_count,
-                    )
+                # 只有 S4 自身失败且 Checkpoint 仍停在 s4_compare 时允许只读兜底。
+                # S1/S2/S3 或持久化异常不能借用旧状态伪造 retrieval-only 结果。
+                allow_s4_fallback = str(failure_code).startswith("S4_") or str(failure_code) in {
+                    "COMPARISON_UNGROUNDED",
+                    "LLM_UNAVAILABLE",
+                }
+                if self.service.workflow is not None and allow_s4_fallback:
+                    try:
+                        job.result = await self.service.workflow.s4_failure_result(
+                            str(job.consultation_id),
+                            str(failure_code),
+                            retry_count=current.s4_retry_count,
+                        )
+                    except ApplicationError as fallback_error:
+                        # 兜底校验失败时保留原始 S4 失败，不把过期来源发布给前端。
+                        self._log(job.consultation_id, fallback_error)
+                        job.result = None
                 if job.result is not None:
                     retrieval_state = job.result.get("retrieval")
                     candidate_count = (
@@ -216,6 +237,10 @@ class ReliableRuntime:
                 return current
             state = job.result or {}
             status = str(state.get("status", "failed"))
+            retry_value = state.get("s4_retry_count", current.s4_retry_count)
+            retry_count = current.s4_retry_count
+            if isinstance(retry_value, (int, str)):
+                retry_count = int(retry_value)
             changes: dict[str, Any] = {
                 "status": status,
                 "turn": current.turn + 1,
@@ -225,11 +250,7 @@ class ReliableRuntime:
                 "failed_stage": state.get("failed_stage"),
                 "result_presentation": state.get("result_presentation", "none"),
                 "retryable": bool(state.get("retryable", False)),
-                "s4_retry_count": int(
-                    state.get("s4_retry_count", current.s4_retry_count)
-                    if isinstance(state.get("s4_retry_count", current.s4_retry_count), (int, str))
-                    else current.s4_retry_count
-                ),
+                "s4_retry_count": retry_count,
                 "last_run_duration_ms": job.duration_ms,
             }
             if state.get("comparison") is not None and status in {

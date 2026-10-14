@@ -7,7 +7,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from backend.app.core.config import Settings
-from backend.app.core.exceptions import ProviderUnavailableError
+from backend.app.core.exceptions import ProviderUnavailableError, S4StreamError
 from backend.app.core.llm import HTTPStructuredLLM
 from backend.app.core.ports import S4StreamPolicy
 
@@ -146,3 +146,77 @@ async def test_s4_stream_does_not_retry_after_partial_content() -> None:
             )
     assert getattr(caught.value, "failure_code", None) == "S4_STREAM_INTERRUPTED"
     assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_s4_stream_handles_crlf_multiline_data_and_usage_only() -> None:
+    """兼容 Windows CRLF 和一个事件拆成多行 data 的标准 SSE。"""
+    body = (
+        'data: {"choices":[{"delta":{"content":"{\\"value\\":7}"}}]}\r\n\r\n'
+        'data: {"choices":[],\r\n'
+        'data: "usage":{"prompt_tokens":3,"completion_tokens":1}}\r\n\r\n'
+        "data: [DONE]\r\n\r\n"
+    )
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        """返回含 CRLF 的合成 SSE。"""
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    async with httpx.AsyncClient(
+        base_url="https://model.test/v1/", transport=httpx.MockTransport(handle)
+    ) as client:
+        result = await HTTPStructuredLLM(settings(), client).ainvoke_structured_stream(
+            [],
+            Payload,
+            policy=S4StreamPolicy(total_seconds=2, first_content_seconds=1, idle_seconds=1),
+        )
+    assert result == Payload(value=7)
+
+
+@pytest.mark.asyncio
+async def test_s4_stream_rejects_finish_length_without_retry() -> None:
+    """模型输出达到上限时必须失败，不能把截断 JSON 当作成功。"""
+    attempts = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        """返回 finish_reason=length。"""
+        nonlocal attempts
+        attempts += 1
+        body = (
+            'data: {"choices":[{"delta":{"content":"{\\"value\\":1"},'
+            '"finish_reason":"length"}]}\n\n'
+        )
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    async with httpx.AsyncClient(
+        base_url="https://model.test/v1/", transport=httpx.MockTransport(handle)
+    ) as client:
+        with pytest.raises(S4StreamError) as caught:
+            await HTTPStructuredLLM(settings(), client).ainvoke_structured_stream(
+                [],
+                Payload,
+                policy=S4StreamPolicy(total_seconds=2, first_content_seconds=1, idle_seconds=1),
+            )
+    assert caught.value.failure_code == "S4_INVALID_RESPONSE"
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_s4_stream_classifies_unsupported_request() -> None:
+    """供应商拒绝 stream/response_format/max_tokens 时返回兼容性失败分类。"""
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        """用 400 模拟供应商不支持流式参数。"""
+        return httpx.Response(400, json={"error": {"message": "stream not supported"}})
+
+    async with httpx.AsyncClient(
+        base_url="https://model.test/v1/", transport=httpx.MockTransport(handle)
+    ) as client:
+        with pytest.raises(S4StreamError) as caught:
+            await HTTPStructuredLLM(settings(), client).ainvoke_structured_stream(
+                [],
+                Payload,
+                policy=S4StreamPolicy(total_seconds=2, first_content_seconds=1, idle_seconds=1),
+            )
+    assert caught.value.failure_code == "S4_PROVIDER_UNAVAILABLE"
+    assert caught.value.details["http_status"] == 400

@@ -213,9 +213,13 @@ async def compare_formula_candidates(
             )
             raise ClinicalLLMUnavailableError(
                 "S4 流式模型不可用，无法生成证据比较",
-                details={"failure_code": exc.failure_code},
+                details=dict(exc.details),
             ) from exc
-        raise ClinicalLLMUnavailableError("S4 模型不可用，无法生成证据比较") from exc
+        details = dict(exc.details) if isinstance(exc, ApplicationError) else {}
+        details.setdefault("failure_code", "S4_PROVIDER_UNAVAILABLE")
+        raise ClinicalLLMUnavailableError(
+            "S4 模型不可用，无法生成证据比较", details=details
+        ) from exc
     fact_ids = {item.fact_id for item in evidence.findings}
     known_ids = {item.fact_id for item in evidence.findings if item.polarity != "unknown"}
     evidence_ids = {

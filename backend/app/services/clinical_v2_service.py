@@ -10,6 +10,7 @@ from langgraph.types import Command
 
 from backend.app.clinical_v2.extraction import extract_clinical_facts
 from backend.app.clinical_v2.schemas import (
+    ChannelLocalizationV2,
     ClinicalEvidenceV2,
     ClinicalV2RunOutcome,
     HumanGraphCommandV2,
@@ -37,6 +38,7 @@ class ClinicalV2Service:
     ) -> None:
         """注入应用级资源，检索预算来自 Settings。"""
         self.llm = llm
+        self.knowledge = knowledge
         self.graph = build_clinical_v2_graph(
             llm,
             checkpointer,
@@ -55,6 +57,22 @@ class ClinicalV2Service:
     def _config(consultation_id: str) -> RunnableConfig:
         """临床线程隔离于旧协议和知识问答。"""
         return {"configurable": {"thread_id": f"clinical-v2:{consultation_id}"}}
+
+    async def _validate_retrieval_sources(self, retrieval: RetrievalBundleV2) -> None:
+        """核验 S3 来源仍属于当前知识快照；测试替身仅允许做结构化身份校验。"""
+        if self.knowledge is None:
+            raise InvalidStateTransitionError("知识服务未装配，不能验证 S3 来源")
+        evidence_ids = [
+            ref.evidence_id
+            for candidate in retrieval.formula_candidates
+            for ref in candidate.source_evidence
+        ]
+        try:
+            resolved = await self.knowledge.get_evidence_by_ids(evidence_ids)
+        except Exception as exc:
+            raise InvalidStateTransitionError("S3 来源已变化，不能复用旧 Checkpoint") from exc
+        if {item.evidence_id for item in resolved} != set(evidence_ids):
+            raise InvalidStateTransitionError("S3 来源不完整，不能复用旧 Checkpoint")
 
     @staticmethod
     def _outcome(consultation_id: str, state: Mapping[str, Any]) -> ClinicalV2RunOutcome:
@@ -134,18 +152,27 @@ class ClinicalV2Service:
         state = checkpoint.values
         if (
             not state
-            or "s4_compare" not in checkpoint.next
+            or (checkpoint.next and checkpoint.next[0] != "s4_compare")
             or not state.get("retrieval")
             or not state.get("clinical_evidence")
+            or not state.get("localization")
         ):
+            return None
+        # LangGraph 在某些版本会把异常节点保留为任务而使 next 为空；
+        # 只要公开状态已经完整停在 S3 结果上，仍需允许一次来源校验后的只读兜底。
+        if not checkpoint.next and state.get("status") not in {"running", "failed"}:
             return None
         try:
             retrieval = RetrievalBundleV2.model_validate(state["retrieval"])
             ClinicalEvidenceV2.model_validate(state["clinical_evidence"])
+            ChannelLocalizationV2.model_validate(state["localization"])
         except Exception as exc:
             raise InvalidStateTransitionError("S4 失败时的 S3 Checkpoint 不完整") from exc
         if not retrieval.formula_candidates:
             return None
+        # 兜底只允许复用当前 KnowledgeService 中仍存在、且版本一致的来源。
+        # 这样知识库更新或 Evidence 删除后会安全关闭兜底，而不会展示过期候选。
+        await self._validate_retrieval_sources(retrieval)
         return {
             "status": "failed",
             "failure_code": failure_code,
@@ -160,3 +187,18 @@ class ClinicalV2Service:
             "paused_at": None,
             "revision": state.get("revision", 0),
         }
+
+    async def validate_s4_checkpoint(self, consultation_id: str) -> None:
+        """验证单阶段 S4 重试仍停在合法 S3 Checkpoint，不重新执行前置阶段。"""
+        checkpoint = await self.graph.aget_state(self._config(consultation_id))
+        if not checkpoint.values or not checkpoint.next or checkpoint.next[0] != "s4_compare":
+            raise InvalidStateTransitionError("当前图 Checkpoint 不是可重试的 S4 阶段")
+        state = checkpoint.values
+        try:
+            retrieval = RetrievalBundleV2.model_validate(state["retrieval"])
+            ClinicalEvidenceV2.model_validate(state["clinical_evidence"])
+        except Exception as exc:
+            raise InvalidStateTransitionError("S4 重试所需的 S1-S3 Checkpoint 不完整") from exc
+        if not retrieval.formula_candidates:
+            raise InvalidStateTransitionError("S3 没有真实候选，不能重试 S4")
+        await self._validate_retrieval_sources(retrieval)

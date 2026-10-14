@@ -311,7 +311,10 @@ class HTTPStructuredLLM:
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code not in {429, 500, 502, 503, 504}:
                     raise S4StreamError(
-                        "S4 服务拒绝请求", failure_code="S4_PROVIDER_UNAVAILABLE"
+                        "S4 服务拒绝请求",
+                        failure_code="S4_PROVIDER_UNAVAILABLE",
+                        http_status=exc.response.status_code,
+                        error_category="http_status",
                     ) from exc
                 if content or attempt:
                     raise S4StreamError(
@@ -320,7 +323,9 @@ class HTTPStructuredLLM:
             except httpx.TransportError as exc:
                 if content or attempt:
                     raise S4StreamError(
-                        "S4 流连接失败", failure_code="S4_STREAM_INTERRUPTED"
+                        "S4 流连接失败",
+                        failure_code="S4_STREAM_INTERRUPTED",
+                        error_category="network",
                     ) from exc
             if deadline - loop.time() <= 0:
                 raise S4StreamError("S4 阶段预算已耗尽", failure_code="S4_STAGE_TIMEOUT")

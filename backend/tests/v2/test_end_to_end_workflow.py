@@ -88,6 +88,65 @@ class FakeKnowledge:
         """本测试不需要额外鉴别来源。"""
         return []
 
+    async def get_evidence_by_ids(self, evidence_ids: list[str]) -> list[Evidence]:
+        """按测试知识快照精确展开 S3 来源，模拟生产 KnowledgeService 契约。"""
+        records = {
+            "1.2:gui-1": Evidence(
+                evidence_id="1.2:gui-1",
+                knowledge_id="gui-1",
+                knowledge_type="formula_pattern",
+                knowledge_version="1.2",
+                source="经典",
+                source_level="L3",
+                content="桂枝汤来源",
+                retrieval_score=1.0,
+                retrieval_method="exact",
+                metadata={"formula_name": "桂枝汤", "review_status": "ok"},
+            ),
+            "1.2:gui-2": Evidence(
+                evidence_id="1.2:gui-2",
+                knowledge_id="gui-2",
+                knowledge_type="formula_pattern",
+                knowledge_version="1.2",
+                source="经典",
+                source_level="L3",
+                content="桂枝汤另一来源",
+                retrieval_score=1.0,
+                retrieval_method="exact",
+                metadata={"formula_name": "桂枝汤", "review_status": "ok"},
+            ),
+            "1.2:ma-1": Evidence(
+                evidence_id="1.2:ma-1",
+                knowledge_id="ma-1",
+                knowledge_type="formula_pattern",
+                knowledge_version="1.2",
+                source="经典",
+                source_level="L3",
+                content="麻黄汤来源",
+                retrieval_score=1.0,
+                retrieval_method="exact",
+                metadata={"formula_name": "麻黄汤", "review_status": "ok"},
+            ),
+        }
+        return [
+            records.get(
+                item,
+                Evidence(
+                    evidence_id=item,
+                    knowledge_id=item.split(":", 1)[-1],
+                    knowledge_type="formula_pattern",
+                    knowledge_version=item.split(":", 1)[0],
+                    source="经典",
+                    source_level="L3",
+                    content="测试来源",
+                    retrieval_score=1.0,
+                    retrieval_method="exact",
+                    metadata={"review_status": "ok"},
+                ),
+            )
+            for item in evidence_ids
+        ]
+
 
 class FullLLM:
     """按 S1/S2/S4 Schema 返回合法结果，记录调用阶段。"""

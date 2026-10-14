@@ -197,6 +197,8 @@ class ConsultationService:
                 or current.retrieval is None
             ):
                 raise InvalidStateTransitionError("当前会诊没有可恢复的 S4 Checkpoint")
+            assert self.workflow is not None
+            await self.workflow.validate_s4_checkpoint(str(identifier))
             pending = current.model_copy(
                 update={
                     "status": "running",

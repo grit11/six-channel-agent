@@ -35,9 +35,21 @@ class S4StreamError(ProviderUnavailableError):
 
     code = "S4_STREAM_FAILED"
 
-    def __init__(self, message: str, *, failure_code: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_code: str,
+        http_status: int | None = None,
+        error_category: str | None = None,
+    ) -> None:
         """保存稳定分类；不携带请求正文、部分 JSON 或患者信息。"""
-        super().__init__(message, details={"failure_code": failure_code})
+        details: dict[str, object] = {"failure_code": failure_code}
+        if http_status is not None:
+            details["http_status"] = http_status
+        if error_category is not None:
+            details["error_category"] = error_category
+        super().__init__(message, details=details)
         self.failure_code = failure_code
 
 

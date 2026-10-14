@@ -63,6 +63,11 @@ async def model_scope(capability: str, *, attempt: int = 0) -> AsyncIterator[dic
         yield metadata
     except Exception as exc:
         metadata["error_type"] = type(exc).__name__
+        details = getattr(exc, "details", {})
+        if isinstance(details, dict):
+            for key in ("failure_code", "error_category", "http_status"):
+                if details.get(key) is not None:
+                    metadata[key] = details[key]
         metadata.setdefault(
             "error_category",
             (
