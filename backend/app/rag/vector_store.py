@@ -1,12 +1,19 @@
-"""Milvus 适配：统一 Remote/Lite 生命周期和版本化索引，依赖配置，不承载医学判断。"""
+"""Milvus 适配：统一 Remote/Lite 生命周期、保活和版本化索引。
+
+依赖配置、pymilvus 和 Lite 服务管理器；取消请求时先等待同步 SDK 结束，最后释放
+客户端及本适配器持有的 Lite 服务，避免 Windows 文件锁残留。不承载医学判断。
+"""
 
 import asyncio
 import json
 import re
+import threading
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, TypeVar
 from uuid import uuid4
 
 from pymilvus import DataType, MilvusClient  # type: ignore[import-untyped]
@@ -27,6 +34,53 @@ from backend.app.schemas.knowledge import (
     KnowledgeType,
     VectorDocument,
 )
+
+Result = TypeVar("Result")
+# Lite 的 .db 实际为本地 gRPC 服务；关闭客户端并不自动停止服务或释放文件锁。
+# 同一路径的工厂创建/关闭串行处理，只有最后一个本适配器客户端退出才释放服务。
+_lite_lifecycle_lock = threading.RLock()
+_lite_references: dict[str, int] = {}
+
+
+async def _run_sync(operation: Callable[[], Result]) -> Result:
+    """等待不可取消的同步 SDK 线程完成，避免关闭资源时仍有后台读写。"""
+    task = asyncio.create_task(asyncio.to_thread(operation))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        except Exception as exc:
+            # 仍向调用者传播取消；线程失败单独记录安全类别，不输出 SDK URI。
+            log_backend_event("vector_cancelled_operation_failed", "milvus", type(exc).__name__)
+        raise
+
+
+def _lite_path(settings: Settings) -> str:
+    """统一相对路径和大小写，确保打开与释放指向同一 Lite 服务。"""
+    return str(Path(settings.milvus_lite_path).resolve())
+
+
+def _release_lite_server(path: str) -> None:
+    """释放当前路径服务，不清理其他数据库、连接或索引文件。"""
+    from milvus_lite.server_manager import server_manager_instance  # type: ignore[import-untyped]
+
+    server_manager_instance.release_server(path)
+
+
+def _close_client(client: MilvusClient, lite_path: str | None) -> None:
+    """关闭专用通道，并在最后一个 Lite 引用退出时释放本地数据库锁。"""
+    if lite_path is None:
+        client.close()
+        return
+    with _lite_lifecycle_lock:
+        client.close()
+        remaining = _lite_references[lite_path] - 1
+        if remaining:
+            _lite_references[lite_path] = remaining
+        else:
+            _release_lite_server(lite_path)
+            del _lite_references[lite_path]
 
 
 @dataclass(frozen=True)
@@ -89,9 +143,14 @@ class MilvusVectorStore:
         client: MilvusClient,
         status: VectorBackendStatus,
         settings: Settings | None = None,
+        *,
+        close_client: Callable[[], None] | None = None,
     ) -> None:
         """绑定已探测的客户端与后端状态。"""
         self._client = client
+        self._close_client = close_client or client.close
+        self._closed = False
+        self._operation_lock = asyncio.Lock()
         self._status = status
         self._settings = settings or Settings()
         self._bases = {
@@ -125,8 +184,24 @@ class MilvusVectorStore:
         return self._status
 
     async def close(self) -> None:
-        """在线程池中关闭同步 SDK，避免阻塞事件循环。"""
-        await asyncio.to_thread(self._client.close)
+        """等待在途 SDK 调用后幂等关闭；Lite 最后一个引用退出时释放文件锁。"""
+        async with self._operation_lock:
+            if self._closed:
+                return
+
+            def close() -> None:
+                """线程完成即记录关闭状态，外层取消也不能重复减少 Lite 引用。"""
+                self._close_client()
+                self._closed = True
+
+            await _run_sync(close)
+
+    async def _operate(self, operation: Callable[[], Result]) -> Result:
+        """串行保护读写与关闭边界；取消不允许线程继续操作已关闭数据库。"""
+        async with self._operation_lock:
+            if self._closed:
+                raise KnowledgeRetrievalError("Milvus 客户端已关闭")
+            return await _run_sync(operation)
 
     def _ensure_manifest(self) -> None:
         """发布入口使用独立集合，单行更新使五类集合一起可见。"""
@@ -172,7 +247,7 @@ class MilvusVectorStore:
     async def get_index(self, profile: IndexProfile) -> IndexReport | None:
         """在线程池读取完整版本，不将空集合当作成功索引。"""
         try:
-            return await asyncio.to_thread(self._get_index, profile)
+            return await self._operate(partial(self._get_index, profile))
         except Exception as exc:
             raise KnowledgeRetrievalError("读取索引发布状态失败") from exc
 
@@ -318,15 +393,8 @@ class MilvusVectorStore:
     ) -> IndexReport:
         """幂等发布完整快照；显式 rebuild 写入新集合，旧集合保留供历史引用。"""
         async with self._write_lock:
-            task = asyncio.create_task(
-                asyncio.to_thread(self._publish, documents, profile, rebuild)
-            )
             try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError:
-                # 同步 SDK 线程不能被取消；等待写入结束后才允许容器关闭客户端。
-                await task
-                raise
+                return await self._operate(partial(self._publish, documents, profile, rebuild))
             except Exception as exc:
                 raise KnowledgeRetrievalError("向量索引未能完整发布") from exc
 
@@ -420,8 +488,8 @@ class MilvusVectorStore:
         validate_vectors([query_vector], 1, profile.dimension)
         expression = self._filter(profile, knowledge_type, filters or {})
         try:
-            return await asyncio.to_thread(
-                self._search, query_vector, knowledge_type, top_k, profile, expression
+            return await self._operate(
+                partial(self._search, query_vector, knowledge_type, top_k, profile, expression)
             )
         except Exception as exc:
             raise KnowledgeRetrievalError("向量查询失败或索引身份不兼容") from exc
@@ -455,7 +523,7 @@ class MilvusVectorStore:
         """受锁保护的显式版本删除，仅用于运维，不在正常查询时自动执行。"""
         async with self._write_lock:
             try:
-                await asyncio.to_thread(self._delete_version, knowledge_version)
+                await self._operate(partial(self._delete_version, knowledge_version))
             except Exception as exc:
                 raise KnowledgeRetrievalError("删除知识索引版本失败") from exc
 
@@ -463,7 +531,7 @@ class MilvusVectorStore:
 def _open_client(settings: Settings, *, lite: bool) -> MilvusClient:
     """创建并真实探测客户端；失败后关闭已构造的连接。"""
     if lite:
-        path = Path(settings.milvus_lite_path)
+        path = Path(_lite_path(settings))
         path.parent.mkdir(parents=True, exist_ok=True)
         uri, token, database = str(path), "", ""
     else:
@@ -477,6 +545,15 @@ def _open_client(settings: Settings, *, lite: bool) -> MilvusClient:
         token=token,
         db_name=database,
         timeout=settings.milvus_connect_timeout_seconds,
+        # 共享连接池不会在 close() 后关闭通道；独占连接让 lifespan 真正拥有资源。
+        dedicated=True,
+        # SDK 默认 10 秒空闲 ping 会被 Lite/Remote 服务拒绝（too_many_pings）。
+        # 不在无 RPC 时发保活；活跃调用的 ping 间隔遵循 gRPC 默认五分钟约束。
+        grpc_options={
+            "grpc.keepalive_time_ms": 300000,
+            "grpc.keepalive_timeout_ms": 20000,
+            "grpc.keepalive_permit_without_calls": False,
+        },
     )
     try:
         client.list_collections(timeout=settings.milvus_connect_timeout_seconds)
@@ -486,26 +563,57 @@ def _open_client(settings: Settings, *, lite: bool) -> MilvusClient:
     return client
 
 
-async def _wrap_client(
-    client: MilvusClient, status: VectorBackendStatus, settings: Settings
-) -> MilvusVectorStore:
-    """适配器配置失败也关闭已连接客户端，防止工厂启动异常泄露资源。"""
+def _create_store(settings: Settings, status: VectorBackendStatus) -> MilvusVectorStore:
+    """创建/引用计数/失败清理处于同一线程边界，不留下半初始化 Lite 服务。"""
+    path = _lite_path(settings) if status.backend == "lite" else None
+
+    def create() -> MilvusVectorStore:
+        """工厂失败只释放自己持有的路径；已有引用不能被另一个失败客户端关闭。"""
+        try:
+            client = _open_client(settings, lite=path is not None)
+        except Exception:
+            if path is not None and path not in _lite_references:
+                _release_lite_server(path)
+            raise
+        if path is not None:
+            _lite_references[path] = _lite_references.get(path, 0) + 1
+        try:
+            return MilvusVectorStore(
+                client, status, settings, close_client=partial(_close_client, client, path)
+            )
+        except Exception:
+            _close_client(client, path)
+            raise
+
+    if path is None:
+        return create()
+    with _lite_lifecycle_lock:
+        return create()
+
+
+async def _open_store(settings: Settings, status: VectorBackendStatus) -> MilvusVectorStore:
+    """启动取消时等待 SDK 创建结束并关闭资源，避免热重载留下 Lite 文件锁。"""
+    task = asyncio.create_task(asyncio.to_thread(_create_store, settings, status))
     try:
-        return MilvusVectorStore(client, status, settings)
-    except Exception:
-        await asyncio.to_thread(client.close)
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            store = await task
+        except Exception as exc:
+            log_backend_event("vector_cancelled_startup_failed", status.backend, type(exc).__name__)
+        else:
+            await store.close()
         raise
 
 
 async def _open_lite(settings: Settings, reason: str) -> MilvusVectorStore:
     """打开 Lite 文件，包缺失或文件不可用时明确失败并保留异常链。"""
     try:
-        client = await asyncio.to_thread(_open_client, settings, lite=True)
+        return await _open_store(settings, VectorBackendStatus("lite", True, reason))
     except Exception as exc:
         raise ProviderUnavailableError(
             "Milvus Lite 不可用，请检查 langgraph 环境的 milvus-lite 依赖与文件权限"
         ) from exc
-    return await _wrap_client(client, VectorBackendStatus("lite", True, reason), settings)
 
 
 async def build_milvus_store(settings: Settings) -> MilvusVectorStore:
@@ -513,13 +621,10 @@ async def build_milvus_store(settings: Settings) -> MilvusVectorStore:
     if settings.milvus_mode == "lite":
         return await _open_lite(settings, "显式 Lite 模式")
     try:
-        client = await asyncio.to_thread(_open_client, settings, lite=False)
+        return await _open_store(settings, VectorBackendStatus("remote", False, "Remote 连接正常"))
     except Exception as exc:
         if settings.milvus_mode == "remote" or not settings.milvus_fallback_to_lite:
             raise ProviderUnavailableError("Remote Milvus 不可用，禁止降级") from exc
         # 只记录异常类型，SDK 错误文本可能包含带凭据的 URI。
         log_backend_event("vector_fallback", "lite", type(exc).__name__)
         return await _open_lite(settings, "Remote 不可用，已降级 Lite")
-    return await _wrap_client(
-        client, VectorBackendStatus("remote", False, "Remote 连接正常"), settings
-    )

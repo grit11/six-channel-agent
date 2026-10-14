@@ -7,6 +7,11 @@ from dataclasses import dataclass
 import httpx
 
 from backend.app.agents.knowledge_qa_agent import KnowledgeQAAgent
+
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:  # pragma: no cover - optional until QA mode is enabled
+    ChatOpenAI = None  # type: ignore[misc,assignment]
 from backend.app.core.config import Settings
 from backend.app.core.exceptions import KnowledgeRetrievalError, PersistenceError
 from backend.app.core.llm import HTTPStructuredLLM, validate_llm_config
@@ -91,6 +96,22 @@ async def open_reranker(settings: Settings) -> AsyncIterator[Reranker]:
         timeout=settings.reranker_timeout_seconds,
     ) as client:
         yield HTTPReranker(settings, client)
+
+
+def build_qa_chat_model(settings: Settings):
+    """基于现有 LLM_* 配置构造 QA 专用 ChatOpenAI，不改变临床 HTTPStructuredLLM。"""
+    if ChatOpenAI is None:
+        raise KnowledgeRetrievalError("QA LangChain 依赖未安装")
+    if not settings.llm_base_url or not settings.llm_model:
+        raise KnowledgeRetrievalError("QA ChatModel 配置不完整")
+    return ChatOpenAI(
+        model=settings.llm_model,
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url.rstrip("/"),
+        temperature=settings.llm_temperature,
+        timeout=settings.llm_timeout_seconds,
+        max_retries=settings.llm_max_retries,
+    )
 
 
 async def configure_knowledge_service(
@@ -232,6 +253,9 @@ async def open_container(settings: Settings) -> AsyncIterator[ApplicationContain
         await runtime.start()
         stack.push_async_callback(runtime.close)
         stream_service = StreamService(repository.runtime)
+        qa_model = None
+        if settings.knowledge_qa_mode == "llm" and llm is not None:
+            qa_model = build_qa_chat_model(settings)
         yield ApplicationContainer(
             settings,
             vector,
@@ -240,7 +264,7 @@ async def open_container(settings: Settings) -> AsyncIterator[ApplicationContain
             knowledge,
             KnowledgeQAService(
                 knowledge,
-                KnowledgeQAAgent(knowledge, llm if settings.knowledge_qa_mode == "llm" else None),
+                KnowledgeQAAgent(knowledge, qa_model),
             ),
             clinical_v2,
             consultation_service,

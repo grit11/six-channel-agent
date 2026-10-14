@@ -1,10 +1,14 @@
-"""S4 测试：排序来自 LLM，程序不重排且不允许候选池外方剂。"""
+"""S4 上下文与来源回归测试，依赖注入模型和知识端口，不调用真实模型或用户数据库。
 
+验证紧凑投影保留事实语义与鉴别条件，完整来源仍供审核展开；不测试医学诊断正确性。
+"""
+
+import json
 from unittest.mock import AsyncMock
 
 import pytest
 
-from backend.app.clinical_v2.comparison import compare_formula_candidates
+from backend.app.clinical_v2.comparison import _clip_text, compare_formula_candidates
 from backend.app.clinical_v2.schemas import (
     ChannelLocalizationV2,
     ClinicalEvidenceV2,
@@ -14,13 +18,16 @@ from backend.app.clinical_v2.schemas import (
     RetrievalQueryPlanV2,
 )
 from backend.app.clinical_v2.verification import verify_comparison_evidence
+from backend.app.schemas.evidence import Evidence
 
 
 class ComparisonLLM:
     """返回指定顺序的结构化比较结果。"""
 
     def __init__(self, result: ComparisonV2) -> None:
+        """保存返回对象与待核对的真实节点输入。"""
         self.result = result
+        self.messages: list[dict[str, str]] = []
 
     async def ainvoke_text(self, messages: list[dict[str, str]]) -> str:
         """S4 必须调用结构化接口。"""
@@ -29,6 +36,7 @@ class ComparisonLLM:
     async def ainvoke_structured(self, messages: list[dict[str, str]], schema: type) -> object:
         """返回模型相对顺序。"""
         assert schema is ComparisonV2
+        self.messages = messages
         return self.result
 
 
@@ -170,3 +178,139 @@ async def test_s4_rejects_candidate_outside_retrieval() -> None:
             evidence, localization, retrieval, knowledge, ComparisonLLM(result)
         )
     assert getattr(caught.value, "code", None) == "COMPARISON_UNGROUNDED"
+
+
+@pytest.mark.asyncio
+async def test_s4_sends_compact_evidence_context() -> None:
+    """S4 请求保留可审计来源，但不再发送完整 DTO、检索轨迹和原始元数据。"""
+    evidence, localization, retrieval = setup()
+    result = ComparisonV2(status="insufficient", ordered_paths=[])
+    llm = ComparisonLLM(result)
+    knowledge = AsyncMock()
+    knowledge.search_differential.return_value = []
+
+    await compare_formula_candidates(evidence, localization, retrieval, knowledge, llm)
+
+    payload = json.loads(llm.messages[-1]["content"])
+    assert payload["context_format"] == "compact_evidence_context_v1"
+    assert "raw_text" not in payload["clinical_evidence"]
+    assert "retrieval_trace" not in payload["retrieval"]
+    assert "retrieved_evidence_ids" not in payload["retrieval"]
+    assert "query_plan" not in payload["retrieval"]
+    assert payload["clinical_evidence"]["findings"][0]["source_text"] == "发热"
+    assert payload["retrieval"]["formula_candidates"][0]["candidate_id"] == "ca"
+
+
+async def test_compact_differential_preserves_dimensions_and_full_review_sources() -> None:
+    """去重不能丢失反证、安全约束、来源版本或医生可展开的完整资料。"""
+    evidence, localization, retrieval = setup()
+    dimensions = {f"维度{i}": "有条件甲；若条件乙不存在则不能据此判断。" for i in range(12)}
+    source = Evidence(
+        evidence_id="1.2:diff-a",
+        knowledge_id="diff-a",
+        knowledge_type="differential",
+        knowledge_version="1.2",
+        source="测试来源",
+        source_level="teaching",
+        content="完整鉴别来源。" * 200,
+        retrieval_score=0.8,
+        retrieval_method="hybrid",
+        metadata={
+            "title": "候选对照",
+            "candidates": ["桂枝汤证", "麻黄汤证"],
+            "key_dimensions": dimensions,
+            "review_status": "needs_expert_review",
+            "red_flags": ["风险提示"],
+            "clinical_use_policy": "只辅助医生",
+            "decision_rules": list(dimensions.values()),
+            "text_for_embedding": "重复文本" * 1000,
+        },
+    )
+    knowledge = AsyncMock()
+    knowledge.search_differential.return_value = [source]
+    llm = ComparisonLLM(ComparisonV2(status="insufficient", ordered_paths=[]))
+    original = source.model_dump(mode="json")
+    result = await compare_formula_candidates(evidence, localization, retrieval, knowledge, llm)
+    compact = json.loads(llm.messages[-1]["content"])["differential_sources"][0]
+    assert compact["key_dimensions"] == dimensions
+    assert compact["red_flags"] == ["风险提示"]
+    assert compact["clinical_use_policy"] == "只辅助医生"
+    assert compact["review_status"] == "needs_expert_review"
+    assert compact["knowledge_version"] == "1.2"
+    assert compact["excerpt"] == ""
+    assert "metadata" not in compact and "retrieval_score" not in compact
+    assert source.model_dump(mode="json") == original
+    assert result.source_evidence[-1].excerpt == source.content[:1200]
+    knowledge.search_differential.assert_awaited_once_with(
+        ["桂枝汤", "麻黄汤"], query=None, top_k=10
+    )
+
+
+async def test_compact_context_preserves_unknown_negative_time_and_unresolved_text() -> None:
+    """事实投影保留未知、阴性、时点、冲突和未解析原文，不能把缺失变为否定。"""
+    _, localization, retrieval = setup()
+    text = "不渴；汗不明；服药前发热；难辨。"
+    findings = []
+    for ident, concept, source_text, polarity, time_scope in [
+        ("fact-a", "口渴", "不渴", "negative", "current"),
+        ("fact-b", "汗", "汗不明", "unknown", "unspecified"),
+        ("fact-c", "发热", "服药前发热", "positive", "before_treatment"),
+    ]:
+        start = text.index(source_text)
+        findings.append(
+            {
+                "fact_id": ident,
+                "concept": concept,
+                "polarity": polarity,
+                "time_scope": time_scope,
+                "source_span": {
+                    "start": start,
+                    "end": start + len(source_text),
+                    "text": source_text,
+                },
+                "review_status": "needs_clarification",
+            }
+        )
+    start = text.index("难辨")
+    evidence = ClinicalEvidenceV2.model_validate(
+        {
+            "raw_text": text,
+            "findings": findings,
+            "conflicts": [["fact-a", "fact-b"]],
+            "unresolved_phrases": [{"start": start, "end": start + 2, "text": "难辨"}],
+        }
+    )
+    knowledge = AsyncMock()
+    knowledge.search_differential.return_value = [
+        Evidence(
+            evidence_id="1.2:plain",
+            knowledge_id="plain",
+            knowledge_type="differential",
+            knowledge_version="1.2",
+            source="测试",
+            source_level="teaching",
+            content="没有关键维度时保留完整原文。" * 100,
+            retrieval_score=1,
+            retrieval_method="bm25",
+        )
+    ]
+    llm = ComparisonLLM(ComparisonV2(status="insufficient", ordered_paths=[]))
+    await compare_formula_candidates(evidence, localization, retrieval, knowledge, llm)
+    payload = json.loads(llm.messages[-1]["content"])
+    compact = payload["clinical_evidence"]
+    assert [x["polarity"] for x in compact["findings"]] == ["negative", "unknown", "positive"]
+    assert compact["findings"][2]["time_scope"] == "before_treatment"
+    assert compact["unresolved_phrases"] == ["难辨"]
+    assert compact["conflicts"] == [["fact-a", "fact-b"]]
+    assert payload["differential_sources"][0]["excerpt"] == (
+        knowledge.search_differential.return_value[0].content
+    )
+
+
+def test_excerpt_does_not_cut_incomplete_conditions() -> None:
+    """来源过长只按完整句子摘录并标记省略；无完整句界时宁可保留全文。"""
+    assert _clip_text("若甲成立且乙不成立才适用", 5) == "若甲成立且乙不成立才适用"
+    excerpt = _clip_text("第一句。若甲成立且乙不成立才适用。", 8)
+    assert excerpt.startswith("第一句。")
+    assert "未展示内容不等于不存在" in excerpt
+    assert "若甲" not in excerpt

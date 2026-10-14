@@ -777,31 +777,6 @@
       .join('');
     bindSources($('knowledgeResults'));
   }
-  /** QA 仅展示接口返回的可追溯内容。 */
-  async function ask() {
-    const r = await api('/api/v1/knowledge/qa', { query: $('qaQuery').value, top_k: 5 });
-    $('qaAnswer').innerHTML = r.sections
-      .map(
-        (s) =>
-          '<h3>' +
-          esc(s.label) +
-          '</h3>' +
-          s.items
-            .map(
-              (i) =>
-                '<p>' +
-                esc(i.text) +
-                '</p><button class="text-link" data-source="' +
-                esc(i.evidence_id) +
-                '">' +
-                esc(i.evidence_id) +
-                '</button>',
-            )
-            .join(''),
-      )
-      .join('');
-    bindSources($('qaAnswer'));
-  }
   /** 历史列表仅进入专用详情，保留当前工作台状态。 */
   async function archive() {
     const page = await api('/api/v2/consultations');
@@ -1032,7 +1007,6 @@
   );
   bind('cancelBtn', () => command('cancel'), true);
   bind('knowledgeSearch', searchKnowledge);
-  bind('askBtn', ask);
   bind('refreshHistory', archive);
   bind('closeHistoryDetail', closeHistory);
   bind('refreshButton', () =>

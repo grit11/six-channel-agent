@@ -2,6 +2,7 @@
 
 import hashlib
 from typing import Literal, Self
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -198,3 +199,61 @@ class IndexReport(BaseModel):
     counts: dict[str, int] = Field(description="核验后的五类文档数量")
     collections: dict[str, str] = Field(description="当前已发布物理集合")
     reused: bool = Field(description="是否复用完全相同的已发布快照")
+
+
+class KnowledgeChatRequest(BaseModel):
+    """V2 知识聊天请求；只接受 QA 会话 ID，不接受临床会诊或患者线程标识。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    message: str = Field(min_length=1, max_length=4000, description="医生知识问题")
+    session_id: UUID | None = Field(default=None, description="QA 临时会话 ID")
+
+
+class QACitation(BaseModel):
+    """本轮工具真实注册的引用标记。"""
+
+    model_config = ConfigDict(extra="forbid")
+    marker: str = Field(pattern=r"^\[[1-9][0-9]*\]$")
+    evidence_id: str = Field(min_length=1)
+    knowledge_type: KnowledgeType
+    source_level: str
+    title: str
+
+
+class QASourceCard(BaseModel):
+    """供知识页展示的真实来源卡；摘要来自 KnowledgeService 原文。"""
+
+    model_config = ConfigDict(extra="forbid")
+    evidence_id: str
+    title: str
+    knowledge_type: KnowledgeType
+    source: str
+    source_level: str
+    excerpt: str
+    association_scope: str | None = None
+
+
+class QAUsage(BaseModel):
+    """模型使用量；Provider 不返回时明确标记不可用。"""
+
+    model_config = ConfigDict(extra="forbid")
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    status: Literal["available", "unavailable"] = "unavailable"
+
+
+class KnowledgeChatResponse(BaseModel):
+    """V2 生成式知识回答及其可核验引用，不包含临床状态。"""
+
+    model_config = ConfigDict(extra="forbid")
+    session_id: UUID
+    turn_id: UUID
+    status: Literal["answered", "partial", "no_evidence"]
+    answer: str
+    citations: list[QACitation] = Field(default_factory=list)
+    sources: list[QASourceCard] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    tools_used: list[str] = Field(default_factory=list)
+    knowledge_version: str
+    usage: QAUsage = Field(default_factory=QAUsage)
+    duration_ms: int = Field(ge=0)

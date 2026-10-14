@@ -243,6 +243,30 @@
     @media(max-width:1170px){.history-paths{grid-template-columns:repeat(2,minmax(0,1fr))}.under-grid{grid-template-columns:1fr}}
     @media(max-width:880px){.step-row{grid-template-columns:repeat(3,minmax(0,1fr))}.history-paths{grid-template-columns:1fr}.title-actions .badge{display:none}}
     @media(max-width:600px){.step-row{grid-template-columns:repeat(2,minmax(0,1fr))}.step{min-height:142px}.title-actions{max-width:140px}.next-consultation{font-size:10px;padding:10px}.history-detail .panel-head{flex-wrap:wrap}.history-detail-body{padding:0 15px 18px}.review-strip input{min-width:0;width:100%}.page-title{gap:10px}.fact-row{flex-direction:column}.fact-row>div{text-align:left}.review-actions{width:100%}}
+
+    [data-view="knowledge"] .qa2-layout{display:grid;grid-template-columns:190px minmax(0,1fr) 300px;gap:14px;min-height:560px;background:#f6f8f6;border:1px solid #dae5e0;border-radius:16px;padding:14px}
+    [data-view="knowledge"] .qa2-tabs{display:flex;align-items:center;gap:8px;margin:18px 0 12px}
+    [data-view="knowledge"] .qa2-tab{border:1px solid #cbded6;background:#fff;color:#315d54;border-radius:999px;padding:9px 16px;cursor:pointer}
+    [data-view="knowledge"] .qa2-tab.active{background:#18846e;color:#fff}
+    [data-view="knowledge"] .qa2-status{margin-left:auto;color:#587d70;font-size:12px}
+    [data-view="knowledge"] .qa2-sessions,[data-view="knowledge"] .qa2-sources{background:#fff;border:1px solid #dae5e0;border-radius:12px;padding:14px}
+    [data-view="knowledge"] .qa2-temporary{font-size:11px;line-height:1.7;color:#7c9290}
+    [data-view="knowledge"] .qa2-chat{display:flex;flex-direction:column;min-width:0}
+    [data-view="knowledge"] .qa2-messages{flex:1;overflow:auto;padding:24px 20px}
+    [data-view="knowledge"] .qa2-welcome{text-align:center;color:#426b61;padding:32px 12px}
+    [data-view="knowledge"] .qa2-example{display:block;width:min(100%,520px);margin:10px auto;padding:12px;text-align:left;border:1px solid #dae5e0;background:#fff;border-radius:10px;color:#315d54;cursor:pointer}
+    [data-view="knowledge"] .qa2-message{max-width:88%;padding:13px 16px;border-radius:12px;margin:10px 0;white-space:pre-wrap;line-height:1.8}
+    [data-view="knowledge"] .qa2-message.user{margin-left:auto;background:#dff1e9;color:#214c47}
+    [data-view="knowledge"] .qa2-message.assistant{background:#fff;border:1px solid #dae5e0;color:#365f59}
+    [data-view="knowledge"] .qa2-compose{display:flex;gap:10px;align-items:end;padding:14px;border-top:1px solid #dae5e0;background:#fff}
+    [data-view="knowledge"] .qa2-compose textarea{flex:1;resize:vertical;min-height:64px}
+    [data-view="knowledge"] .qa2-compose-actions{display:flex;gap:8px;align-items:center}
+    [data-view="knowledge"] .qa2-source-detail{white-space:pre-wrap;line-height:1.8;color:#41625e;border-top:1px dashed #cbded4;margin-top:10px;padding-top:10px}
+    [data-view="knowledge"] .qa2-source-card{padding:12px;margin:10px 0;border:1px solid #dae5e0;border-radius:10px;background:#fbfdfb;cursor:pointer}
+    [data-view="knowledge"] .qa2-source-card strong{display:block;color:#315d54;margin-bottom:5px}
+    [data-view="knowledge"] .qa2-source-card small{color:#738985}
+    @media(max-width:1100px){[data-view="knowledge"] .qa2-layout{grid-template-columns:1fr 260px}.qa2-sessions{display:none}}
+    @media(max-width:700px){[data-view="knowledge"] .qa2-layout{grid-template-columns:1fr;padding:8px}.qa2-sources{display:none}.qa2-sources.qa2-open{display:block;position:fixed;z-index:20;inset:12vh 6vw auto;padding:14px;max-height:70vh;overflow:auto;box-shadow:0 18px 50px rgba(17,46,55,.24)}.qa2-compose{flex-direction:column}.qa2-compose-actions{width:100%}.qa2-compose-actions button{flex:1;min-height:44px}}
 </style>
 </head>
 <body>
@@ -306,10 +330,15 @@
       </section>
       <section class="view" data-view="history"><div class="page-title"><div><div class="eyebrow">Consultation Archive</div><h1>会诊历史</h1><p class="subtitle">历史记录在此只读查看，不会覆盖当前问诊工作台。</p></div><button id="refreshHistory" class="outline-btn" type="button">刷新历史</button></div><p id="historyStatus" class="subtitle">等待读取…</p><div id="historyList" class="k-results"></div><section id="historyDetail" class="panel history-detail" hidden><div class="panel-head"><div><h3 id="historyDetailTitle">会诊详情</h3><span class="section-sub">只读查看 · 病例 / 证据 / 医生审核</span></div><button id="closeHistoryDetail" class="outline-btn" type="button">返回历史列表</button></div><div id="historyDetailBody" class="history-detail-body"></div></section></section>
       <section class="view" data-view="knowledge">
-        <div class="page-title"><div><div class="eyebrow">Knowledge Center</div><h1>经典知识速查</h1><p class="subtitle">检索项目附带的《伤寒论》V1.2 条文；直接展示原文，不经大模型改写</p></div><span class="badge">398 个可追溯条文</span></div>
-        <div class="intro"><div><div class="hero-kicker">KNOWLEDGE REFERENCE LIBRARY</div><h2>方证有据 · 原文可考</h2><p>输入条文号、方剂名称或原文关键词；通过现有 KnowledgeService 检索，保持来源版本与审核信息。</p></div><div class="intro-stats"><div class="intro-num"><strong>V1.2</strong><span>知识库版本</span></div><div class="intro-num"><strong>398</strong><span>经典条文</span></div></div></div>
-        <div class="k-search"><input id="knowledgeQuery" placeholder="试试：35 / 麻黄汤 / 无汗 / 往来寒热" value="麻黄汤"><button id="knowledgeSearch" type="button" class="primary-btn">搜索经典条文 →</button></div>
-        <p class="subtitle" id="knowledgeStatus" style="margin-bottom:15px">等待搜索…</p><div id="knowledgeResults" class="k-results"></div><section class="panel qa-panel"><div class="panel-head"><div><h3>知识问答</h3><span class="section-sub">Extractive Knowledge QA</span></div></div><div class="k-search"><input id="qaQuery" placeholder="围绕条文和方证提问"><button id="askBtn" type="button" class="primary-btn">基于来源回答 →</button></div><div id="qaAnswer" class="qa-answer"><p class="small-empty">答案只展示后端返回的来源摘录。</p></div></section>
+        <div class="page-title"><div><div class="eyebrow">Knowledge Intelligence</div><h1>经典知识问答</h1><p class="subtitle">基于《伤寒论》经典、方证、鉴别资料及历史医案的可追溯知识助手</p></div><span class="badge">QA 临时会话</span></div>
+        <div class="qa2-tabs"><button class="qa2-tab active" data-qa2-tab="chat" type="button">知识问答</button><button class="qa2-tab" data-qa2-tab="lookup" type="button">条文速查</button><span id="qa2Status" class="qa2-status" aria-live="polite">等待提问</span></div>
+        <div class="qa2-layout">
+          <aside class="qa2-sessions"><button id="qa2New" class="primary-btn" type="button">＋ 新建会话</button><p class="qa2-temporary">临时会话 · 不保存到病历/临床审核</p><div id="qa2SessionList"></div></aside>
+          <section class="qa2-chat"><div id="qa2Messages" class="qa2-messages" aria-live="polite"><div class="qa2-welcome"><h2>从经典证据开始提问</h2><p>回答由真实知识工具检索后生成，并显示可核验来源。</p><button class="qa2-example" type="button">桂枝汤证与麻黄汤证怎样鉴别？</button><button class="qa2-example" type="button">《伤寒论》第35条主要说明什么？</button><button class="qa2-example" type="button">合病与并病在六经辨证中有什么不同？</button></div></div><div class="qa2-compose"><textarea id="qa2Input" rows="3" placeholder="输入关于经典、方证或鉴别的知识问题"></textarea><div class="qa2-compose-actions"><button id="qa2SourceToggle" class="outline-btn" type="button">查看来源</button><button id="qa2Send" class="primary-btn" type="button">发送</button></div></div></section>
+          <aside class="qa2-sources"><div class="panel-head"><div><h3>本轮引用来源</h3><span class="section-sub">Evidence Registry</span></div></div><div id="qa2Sources" class="qa2-source-list"><p class="small-empty">本轮尚未检索到来源</p></div></aside>
+        </div>
+        <div class="qa2-lookup" hidden><div class="k-search"><input id="knowledgeQuery" placeholder="试试：35 / 麻黄汤 / 无汗 / 往来寒热" value="麻黄汤"><button id="knowledgeSearch" type="button" class="primary-btn">搜索经典条文 →</button></div><p class="subtitle" id="knowledgeStatus" style="margin-bottom:15px">等待搜索…</p><div id="knowledgeResults" class="k-results"></div></div>
+      </section>
       </section>
       <section class="view" data-view="trace">
         <div class="page-title"><div><div class="eyebrow">Execution Observatory</div><h1>Agent 执行轨迹</h1><p class="subtitle">可审计执行事件 · 会话标识 · 阶段状态，无模型隐藏 CoT</p></div><span class="badge">SSE Event Stream</span></div>
@@ -325,5 +354,6 @@
 <div class="toast" role="status" id="toast"></div>
 <script src="/console-static/labels.js"></script>
 <script src="/console-static/console.js"></script>
+<script src="/console-static/knowledge_qa.js"></script>
 </body>
 </html>

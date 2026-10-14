@@ -18,3 +18,7 @@ Unknown 不等于 Negative；未提及不生成占位 Finding。Finding 保留�
 Router 不写医学逻辑；领域代码不 import FastAPI；Provider、Embedding、Reranker、Milvus、PostgreSQL 和 Checkpoint 均经工厂注入。新建或实质修改 Python 文件必须有中文模块说明、类型标注和公开 docstring；使用 Black 100、Ruff、mypy。不得记录密钥、密码、完整患者原文或隐藏推理。
 
 当前基线提交为 17e303d9988708572631c9feb77638ddaafff5dc，冻结标签为 v1.2-before-clinical-v2。不改 main/V1.2 历史，不自动 push；用户明确要求后才提交或推送。每期报告必须列实际退出码、模型调用/失败和遗留风险。
+
+## QA V2 专项附录
+
+QA V2 只允许修改 QA 白名单文件和知识 view；临床 V2、KnowledgeService、RAG、持久化、配置及其他 view 冻结。知识聊天使用 LangChain create_agent 与四个只读工具，QA 会话为临时内存状态，不使用临床 checkpoint。

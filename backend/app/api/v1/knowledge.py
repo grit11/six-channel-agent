@@ -1,6 +1,7 @@
 """知识查询 API：只转发 KnowledgeService 结果，不在 Router 编写医学规则或直接访问 Milvus。"""
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from backend.app.core.exceptions import KnowledgeNotFoundError, KnowledgeRetrievalError
 from backend.app.schemas.evidence import Evidence
@@ -11,7 +12,6 @@ from backend.app.schemas.knowledge import (
     DifferentialSearchRequest,
     FormulaSearchRequest,
     KnowledgeQARequest,
-    KnowledgeQAResponse,
 )
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
@@ -29,10 +29,19 @@ async def get_evidence(request: Request, evidence_id: str) -> Evidence:
     return items[0]
 
 
-@router.post("/qa", response_model=KnowledgeQAResponse)
-async def ask_knowledge(request: Request, payload: KnowledgeQARequest) -> KnowledgeQAResponse:
-    """独立知识问答，不读取或修改临床会诊状态。"""
-    return await request.app.state.container.knowledge_qa_service.ask(payload)
+@router.post("/qa")
+async def ask_knowledge(request: Request, payload: KnowledgeQARequest) -> JSONResponse:
+    """旧摘录式 QA 入口只返回迁移提示，避免静默执行过时代码。"""
+    return JSONResponse(
+        status_code=410,
+        content={
+            "error": {
+                "code": "QA_ENDPOINT_DEPRECATED",
+                "message": "知识问答已迁移到 /api/v2/knowledge/chat",
+                "target": "/api/v2/knowledge/chat",
+            }
+        },
+    )
 
 
 @router.get("/clauses/{clause_id}", response_model=Evidence)
