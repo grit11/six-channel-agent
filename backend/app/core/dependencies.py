@@ -16,7 +16,7 @@ from backend.app.core.config import Settings
 from backend.app.core.exceptions import KnowledgeRetrievalError, PersistenceError
 from backend.app.core.llm import HTTPStructuredLLM, validate_llm_config
 from backend.app.core.logging import log_backend_event
-from backend.app.core.ports import EmbeddingProvider, StructuredLLM
+from backend.app.core.ports import EmbeddingProvider, S4StreamPolicy, StructuredLLM
 from backend.app.knowledge.service import KnowledgeService
 from backend.app.persistence.checkpoint import (
     CheckpointRuntime,
@@ -210,6 +210,13 @@ async def open_container(settings: Settings) -> AsyncIterator[ApplicationContain
                 max_clarification_rounds=settings.max_clarification_rounds,
                 retrieval_top_k=settings.retrieval_top_k,
                 differential_top_k=settings.rerank_top_k,
+                s4_policy=S4StreamPolicy(
+                    total_seconds=settings.s4_total_seconds,
+                    first_content_seconds=settings.s4_first_content_seconds,
+                    idle_seconds=settings.s4_idle_seconds,
+                    max_output_tokens=settings.s4_max_output_tokens,
+                    connect_timeout_seconds=settings.s4_connect_timeout_seconds,
+                ),
             )
             if llm is not None
             else None

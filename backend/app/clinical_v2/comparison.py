@@ -17,8 +17,8 @@ from backend.app.clinical_v2.schemas import (
     ComparisonV2,
     RetrievalBundleV2,
 )
-from backend.app.core.exceptions import ApplicationError, ProviderUnavailableError
-from backend.app.core.ports import StructuredLLM
+from backend.app.core.exceptions import ApplicationError, ProviderUnavailableError, S4StreamError
+from backend.app.core.ports import S4StreamPolicy, StreamUsage, StructuredLLM
 from backend.app.knowledge.service import KnowledgeService
 from backend.app.schemas.evidence import Evidence
 
@@ -146,6 +146,7 @@ async def compare_formula_candidates(
     llm: StructuredLLM,
     *,
     differential_top_k: int = 10,
+    s4_policy: S4StreamPolicy | None = None,
 ) -> ComparisonV2:
     """一次结构化调用比较 S3 候选；程序签发 grounded 状态。"""
     guide_dir = Path(__file__).parent / "prompts"
@@ -176,15 +177,44 @@ async def compare_formula_candidates(
         "retrieval": _compact_retrieval(retrieval),
         "differential_sources": _compact_differential_sources(differential),
     }
+    messages = [
+        {"role": "system", "content": prompt + "\n" + guide},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    from backend.app.observability.progress import emit_progress
+
     try:
-        draft = await llm.ainvoke_structured(
-            [
-                {"role": "system", "content": prompt + "\n" + guide},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            ComparisonV2,
-        )
+        if s4_policy is not None and hasattr(llm, "ainvoke_structured_stream"):
+            await emit_progress("s4_stream_started", {"stream_status": "waiting"})
+
+            async def on_progress(usage: StreamUsage) -> None:
+                """将 S4 流式公开进度交给现有进度上下文，不记录正文。"""
+                await emit_progress(
+                    "s4_stream_progress",
+                    {
+                        "elapsed_ms": usage.elapsed_ms,
+                        "received_content_chars": usage.output_chars,
+                        "content_chunks": usage.content_chunks,
+                        "usage_status": usage.usage_status,
+                    },
+                )
+
+            stream_llm = llm  # runtime capability is checked without changing S1/S2 port
+            draft = await stream_llm.ainvoke_structured_stream(  # type: ignore[attr-defined]
+                messages, ComparisonV2, policy=s4_policy, on_progress=on_progress
+            )
+        else:
+            draft = await llm.ainvoke_structured(messages, ComparisonV2)
     except ProviderUnavailableError as exc:
+        if isinstance(exc, S4StreamError):
+            await emit_progress(
+                "s4_stream_failed",
+                {"failure_code": exc.failure_code, "fallback_available": True},
+            )
+            raise ClinicalLLMUnavailableError(
+                "S4 流式模型不可用，无法生成证据比较",
+                details={"failure_code": exc.failure_code},
+            ) from exc
         raise ClinicalLLMUnavailableError("S4 模型不可用，无法生成证据比较") from exc
     fact_ids = {item.fact_id for item in evidence.findings}
     known_ids = {item.fact_id for item in evidence.findings if item.polarity != "unknown"}

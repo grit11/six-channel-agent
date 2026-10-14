@@ -23,3 +23,5 @@ class RunJob(BaseModel):
     lease_until: datetime | None = None
     result: dict[str, object] | None = None
     duration_ms: int | None = None
+    retry_s4: bool = False
+    idempotency_key: str | None = None

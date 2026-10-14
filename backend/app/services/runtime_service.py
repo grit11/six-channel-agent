@@ -161,10 +161,36 @@ class ReliableRuntime:
                 raise
             except Exception as exc:
                 self._log(job.consultation_id, exc)
-                job.result = {
-                    "status": "failed",
-                    "failure_code": exc.code if isinstance(exc, ApplicationError) else "RUN_FAILED",
-                }
+                failure_code = (
+                    exc.details.get("failure_code")
+                    if isinstance(exc, ApplicationError) and exc.details.get("failure_code")
+                    else exc.code if isinstance(exc, ApplicationError) else "RUN_FAILED"
+                )
+                job.result = None
+                if self.service.workflow is not None:
+                    job.result = await self.service.workflow.s4_failure_result(
+                        str(job.consultation_id),
+                        str(failure_code),
+                        retry_count=current.s4_retry_count,
+                    )
+                if job.result is not None:
+                    retrieval_state = job.result.get("retrieval")
+                    candidate_count = (
+                        len(retrieval_state.get("formula_candidates", []))
+                        if isinstance(retrieval_state, dict)
+                        else 0
+                    )
+                    await self.store.emit(
+                        job.consultation_id,
+                        job.turn,
+                        "s4_retrieval_fallback_ready",
+                        {
+                            "candidate_count": candidate_count,
+                            "result_presentation": "s3_retrieval_only",
+                        },
+                    )
+                if job.result is None:
+                    job.result = {"status": "failed", "failure_code": str(failure_code)}
                 await self.store.emit(
                     job.consultation_id,
                     job.turn,
@@ -196,8 +222,21 @@ class ReliableRuntime:
                 "revision": state.get("revision", current.revision),
                 "paused_at": state.get("paused_at"),
                 "failure_code": state.get("failure_code"),
+                "failed_stage": state.get("failed_stage"),
+                "result_presentation": state.get("result_presentation", "none"),
+                "retryable": bool(state.get("retryable", False)),
+                "s4_retry_count": int(
+                    state.get("s4_retry_count", current.s4_retry_count)
+                    if isinstance(state.get("s4_retry_count", current.s4_retry_count), (int, str))
+                    else current.s4_retry_count
+                ),
                 "last_run_duration_ms": job.duration_ms,
             }
+            if state.get("comparison") is not None and status in {
+                "awaiting_doctor_review",
+                "completed",
+            }:
+                changes["result_presentation"] = "llm_compared"
             for key in ("clinical_evidence", "localization", "retrieval", "comparison"):
                 if key in state:
                     changes[key] = state[key]
@@ -214,6 +253,8 @@ class ReliableRuntime:
             changes["completed_stages"] = stages + (
                 ["s5_doctor_review"] if status == "completed" else []
             )
+            if status == "failed" and changes["result_presentation"] == "s3_retrieval_only":
+                changes["completed_stages"] = [stage for stage in stages if stage != "s4_compare"]
             if status in {"completed", "undetermined", "cancelled", "failed"}:
                 changes["completed_at"] = datetime.now(UTC)
             if status == "completed" and job.command and job.command.review:

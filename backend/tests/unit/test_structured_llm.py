@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from backend.app.core.config import Settings
 from backend.app.core.exceptions import ProviderUnavailableError
 from backend.app.core.llm import HTTPStructuredLLM
+from backend.app.core.ports import S4StreamPolicy
 
 
 class Payload(BaseModel):
@@ -88,4 +89,60 @@ async def test_permanent_http_error_or_truncated_content_fails(status: int, fini
     ) as client:
         with pytest.raises(ProviderUnavailableError):
             await HTTPStructuredLLM(settings(), client).ainvoke_structured([], Payload)
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_s4_stream_parses_delta_usage_and_done() -> None:
+    """S4 解析增量正文、usage-only 事件和结束帧，不返回隐藏字段。"""
+    body = (
+        'data: {"choices":[{"delta":{"content":"{\\"value\\":"}}]}\n\n'
+        'data: {"choices":[{"delta":{"content":"7}"},"finish_reason":"stop"}]}\n\n'
+        'data: {"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2}}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        """返回标准 Chat SSE，验证请求确实启用 stream。"""
+        payload = json.loads(request.content)
+        assert payload["stream"] is True
+        assert payload["stream_options"]["include_usage"] is True
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    async with httpx.AsyncClient(
+        base_url="https://model.test/v1/", transport=httpx.MockTransport(handle)
+    ) as client:
+        result = await HTTPStructuredLLM(settings(), client).ainvoke_structured_stream(
+            [],
+            Payload,
+            policy=S4StreamPolicy(total_seconds=2, first_content_seconds=1, idle_seconds=1),
+        )
+    assert result == Payload(value=7)
+
+
+@pytest.mark.asyncio
+async def test_s4_stream_does_not_retry_after_partial_content() -> None:
+    """正文已经产生后提前断流只能失败，不能重发整份请求。"""
+    attempts = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        """返回没有 DONE 的不完整流。"""
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content='data: {"choices":[{"delta":{"content":"{"}}]}\n\n',
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://model.test/v1/", transport=httpx.MockTransport(handle)
+    ) as client:
+        with pytest.raises(Exception) as caught:
+            await HTTPStructuredLLM(settings(), client).ainvoke_structured_stream(
+                [],
+                Payload,
+                policy=S4StreamPolicy(total_seconds=2, first_content_seconds=1, idle_seconds=1),
+            )
+    assert getattr(caught.value, "failure_code", None) == "S4_STREAM_INTERRUPTED"
     assert attempts == 1

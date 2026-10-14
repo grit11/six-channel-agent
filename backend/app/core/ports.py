@@ -1,10 +1,50 @@
 """模型与向量化能力端口，应用模块只依赖抽象，具体 Provider 由工厂注入。"""
 
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
 StructuredResult = TypeVar("StructuredResult", bound=BaseModel)
+
+
+@dataclass(frozen=True)
+class S4StreamPolicy:
+    """S4 流式调用预算；只约束模型等待，不改变 S1/S2 的通用超时。"""
+
+    total_seconds: float = 110.0
+    first_content_seconds: float = 40.0
+    idle_seconds: float = 25.0
+    max_output_tokens: int = 3000
+    connect_timeout_seconds: float = 10.0
+
+
+@dataclass(frozen=True)
+class StreamUsage:
+    """S4 流式公开进度元数据，不包含模型正文或隐藏推理。"""
+
+    output_chars: int
+    content_chunks: int
+    usage_status: str = "unavailable"
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    elapsed_ms: int = 0
+
+
+class StreamingStructuredLLM(Protocol):
+    """S4 专用流式结构化端口，业务层不依赖具体 HTTP Provider。"""
+
+    async def ainvoke_structured_stream(
+        self,
+        messages: list[dict[str, str]],
+        schema: type[StructuredResult],
+        *,
+        policy: S4StreamPolicy,
+        on_progress: Callable[[StreamUsage], Awaitable[None]] | None = None,
+    ) -> StructuredResult:
+        """在预算内消费 SSE 并仅在完整 JSON 结束后返回 Schema 对象。"""
+        ...
 
 
 class StructuredLLM(Protocol):

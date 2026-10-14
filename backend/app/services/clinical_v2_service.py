@@ -13,9 +13,10 @@ from backend.app.clinical_v2.schemas import (
     ClinicalEvidenceV2,
     ClinicalV2RunOutcome,
     HumanGraphCommandV2,
+    RetrievalBundleV2,
 )
-from backend.app.core.exceptions import ConsultationNotFoundError
-from backend.app.core.ports import StructuredLLM
+from backend.app.core.exceptions import ConsultationNotFoundError, InvalidStateTransitionError
+from backend.app.core.ports import S4StreamPolicy, StructuredLLM
 from backend.app.graph.clinical_v2_graph import build_clinical_v2_graph
 from backend.app.knowledge.service import KnowledgeService
 
@@ -32,6 +33,7 @@ class ClinicalV2Service:
         max_clarification_rounds: int = 3,
         retrieval_top_k: int = 20,
         differential_top_k: int = 10,
+        s4_policy: S4StreamPolicy | None = None,
     ) -> None:
         """注入应用级资源，检索预算来自 Settings。"""
         self.llm = llm
@@ -42,6 +44,7 @@ class ClinicalV2Service:
             max_clarification_rounds=max_clarification_rounds,
             retrieval_top_k=retrieval_top_k,
             differential_top_k=differential_top_k,
+            s4_policy=s4_policy,
         )
 
     async def parse(self, text: str) -> ClinicalEvidenceV2:
@@ -122,3 +125,38 @@ class ClinicalV2Service:
         if not checkpoint.values:
             raise ConsultationNotFoundError("未找到 V2 图状态")
         return self._outcome(consultation_id, checkpoint.values)
+
+    async def s4_failure_result(
+        self, consultation_id: str, failure_code: str, *, retry_count: int = 0
+    ) -> dict[str, Any] | None:
+        """从同一图 Checkpoint 投影 S3 真实候选，失败时只发布只读兜底。"""
+        checkpoint = await self.graph.aget_state(self._config(consultation_id))
+        state = checkpoint.values
+        if (
+            not state
+            or "s4_compare" not in checkpoint.next
+            or not state.get("retrieval")
+            or not state.get("clinical_evidence")
+        ):
+            return None
+        try:
+            retrieval = RetrievalBundleV2.model_validate(state["retrieval"])
+            ClinicalEvidenceV2.model_validate(state["clinical_evidence"])
+        except Exception as exc:
+            raise InvalidStateTransitionError("S4 失败时的 S3 Checkpoint 不完整") from exc
+        if not retrieval.formula_candidates:
+            return None
+        return {
+            "status": "failed",
+            "failure_code": failure_code,
+            "failed_stage": "s4_compare",
+            "result_presentation": "s3_retrieval_only",
+            "retryable": True,
+            "s4_retry_count": retry_count,
+            "clinical_evidence": state.get("clinical_evidence"),
+            "localization": state.get("localization"),
+            "retrieval": retrieval.model_dump(mode="json"),
+            "comparison": None,
+            "paused_at": None,
+            "revision": state.get("revision", 0),
+        }

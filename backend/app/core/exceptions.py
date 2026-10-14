@@ -30,6 +30,17 @@ class ProviderUnavailableError(ApplicationError):
     code = "PROVIDER_UNAVAILABLE"
 
 
+class S4StreamError(ProviderUnavailableError):
+    """S4 流式协议或预算失败，携带可公开的阶段失败分类。"""
+
+    code = "S4_STREAM_FAILED"
+
+    def __init__(self, message: str, *, failure_code: str) -> None:
+        """保存稳定分类；不携带请求正文、部分 JSON 或患者信息。"""
+        super().__init__(message, details={"failure_code": failure_code})
+        self.failure_code = failure_code
+
+
 class PersistenceError(ApplicationError):
     """持久化操作失败。"""
 

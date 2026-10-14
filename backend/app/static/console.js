@@ -26,6 +26,7 @@
     undetermined: '未决',
     cancelled: '已取消',
     failed: '执行失败',
+    s3_retrieval_only: 'S3 检索兜底',
     positive: '阳性',
     negative: '阴性',
     unknown: '未知',
@@ -510,6 +511,7 @@
     const s = state.snapshot,
       review = s?.paused_at === 's5_doctor_review' && s.status === 'awaiting_doctor_review',
       paused = Boolean(s?.paused_at),
+      fallback = s?.result_presentation === 's3_retrieval_only',
       busy = state.busy;
     $('startBtn').disabled = busy || Boolean(s) || !state.config?.consultation_enabled;
     $('parseBtn').disabled = busy || Boolean(s) || !state.config?.agent_connected;
@@ -521,9 +523,10 @@
         s && !terminal.has(s.status) ? '请先完成或取消本次问诊' : '清空工作台，开始新的问诊';
     });
     ['acceptBtn', 'modifyBtn'].forEach(
-      (id) => ($(id).disabled = busy || !review || !s?.comparison?.ordered_paths.length),
+      (id) => ($(id).disabled = busy || !review || fallback || !s?.comparison?.ordered_paths.length),
     );
-    ['rejectBtn', 'noteBtn'].forEach((id) => ($(id).disabled = busy || !review));
+    ['rejectBtn', 'noteBtn'].forEach((id) => ($(id).disabled = busy || !review || fallback));
+    $('retryS4Btn').disabled = busy || !fallback || !s?.retryable;
     $('addEvidence').disabled = busy || !paused;
     $('deferBtn').disabled = busy || s?.paused_at !== 's2_clarification';
     $('cancelBtn').disabled = busy || !paused;
@@ -567,14 +570,33 @@
       '当前无补问';
     const paths = s.comparison?.ordered_paths || [],
       candidates = s.retrieval?.formula_candidates || [];
-    $('resultNotice').textContent =
-      '检索候选 ' +
-      candidates.length +
-      ' 个：' +
-      candidates.map((c) => c.formula_name).join(' / ') +
-      '。比较顺序来自 LLM；来源核验不代表临床正确性。';
+    const fallback = s.result_presentation === 's3_retrieval_only';
+    $('resultNotice').textContent = fallback
+      ? 'S4 大模型方证鉴别未完成，以下为 S3 检索候选，并非医学辨证优先级。'
+      : '检索候选 ' +
+        candidates.length +
+        ' 个：' +
+        candidates.map((c) => c.formula_name).join(' / ') +
+        '。比较顺序来自 LLM；来源核验不代表临床正确性。';
     $('results').innerHTML =
-      paths.map((p, i) => card(p, i)).join('') ||
+      (fallback
+        ? candidates
+            .map(
+              (c, i) =>
+                '<article class="result-card"><div class="result-top"><span class="result-rank">检索候选 ' +
+                (i + 1) +
+                '</span><span class="chip unknown">S3 只读</span></div><h3 class="result-name">' +
+                esc(c.formula_name) +
+                '</h3><p class="result-channels">' +
+                esc(c.six_channel_tags.join(' / ')) +
+                '</p><p class="result-rationale">' +
+                esc(c.coverage_notes.join('；') || '来源检索候选') +
+                '</p><div class="result-footer"><span>真实来源 ' +
+                c.source_evidence.length +
+                ' 条</span><strong>只读回查</strong></div></article>',
+            )
+            .join('')
+        : paths.map((p, i) => card(p, i)).join('')) ||
       '<div class="empty-state"><div class="empty-ring">六</div><strong>' +
         esc(label(s.status)) +
         '</strong><p>尚无可靠比较结果</p></div>';
@@ -585,7 +607,9 @@
     if (paths.length)
       selectPath(paths.find((p) => p.path_id === state.selected?.path_id) || adopted || paths[0]);
     else clearPath();
-    $('reviewState').textContent = s.doctor_review
+    $('reviewState').textContent = fallback
+      ? 'S4 尚未完成，仅展示 S3 真实检索候选。可点击“仅重试鉴别”，成功后再进行医生审核。'
+      : s.doctor_review
       ? '本次问诊已完成 · 医生' +
         label(s.doctor_review.action) +
         ' · ' +
@@ -622,6 +646,11 @@
       'model_started',
       'model_completed',
       'model_failed',
+      's4_stream_started',
+      's4_stream_progress',
+      's4_stream_failed',
+      's4_retrieval_fallback_ready',
+      's4_retry_started',
       'retrieval_started',
       'retrieval_completed',
       'clarification_requested',
@@ -1006,6 +1035,21 @@
     true,
   );
   bind('cancelBtn', () => command('cancel'), true);
+  bind(
+    'retryS4Btn',
+    async () => {
+      const s = state.snapshot;
+      if (!s?.retryable || s.result_presentation !== 's3_retrieval_only') return;
+      const result = await api('/api/v2/consultations/' + encodeURIComponent(s.consultation_id) + '/retry-s4', {
+        expected_turn: s.turn,
+        expected_revision: s.revision,
+        idempotency_key: crypto.randomUUID(),
+      });
+      render(result);
+      await replay(s.consultation_id, state.epoch);
+    },
+    true,
+  );
   bind('knowledgeSearch', searchKnowledge);
   bind('refreshHistory', archive);
   bind('closeHistoryDetail', closeHistory);

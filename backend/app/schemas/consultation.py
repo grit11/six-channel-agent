@@ -62,6 +62,10 @@ class ConsultationSnapshot(BaseModel):
     versions: dict[str, str] = Field(default_factory=dict)
     completed_stages: list[str] = Field(default_factory=list)
     failure_code: str | None = None
+    failed_stage: Literal["s1_extract", "s2_localize", "s3_retrieve", "s4_compare"] | None = None
+    result_presentation: Literal["none", "llm_compared", "s3_retrieval_only"] = "none"
+    retryable: bool = False
+    s4_retry_count: int = Field(default=0, ge=0)
     last_run_duration_ms: int | None = None
     created_at: datetime
     updated_at: datetime

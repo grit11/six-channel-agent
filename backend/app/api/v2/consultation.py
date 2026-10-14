@@ -24,6 +24,15 @@ class ConsultationCreateV2(BaseModel):
     consultation_id: UUID | None = None
 
 
+class RetryS4Request(BaseModel):
+    """S4 单阶段恢复请求；输入版本必须与失败快照一致。"""
+
+    model_config = ConfigDict(extra="forbid")
+    expected_turn: int = Field(ge=1)
+    expected_revision: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
 @router.post("", response_model=ConsultationSnapshot)
 async def create(
     request: Request,
@@ -72,3 +81,16 @@ async def clarify(
     if command.kind != "clarify":
         raise InvalidBusinessRequestError("澄清入口仅允许 clarify")
     return await request.app.state.container.consultation_service.resume(consultation_id, command)
+
+
+@router.post("/{consultation_id}/retry-s4", response_model=ConsultationSnapshot)
+async def retry_s4(
+    request: Request, consultation_id: UUID, payload: RetryS4Request
+) -> ConsultationSnapshot:
+    """只恢复 S4 比较；S1/S2/S3 不从入口重新执行。"""
+    return await request.app.state.container.consultation_service.retry_s4(
+        consultation_id,
+        expected_turn=payload.expected_turn,
+        expected_revision=payload.expected_revision,
+        idempotency_key=payload.idempotency_key,
+    )

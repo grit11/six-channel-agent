@@ -159,6 +159,69 @@ class ConsultationService:
                     expected_turn=current.turn,
                     runtime_records=[("job", str(job.run_id), job.model_dump(mode="json"))],
                 )
+                await self.repository.runtime.emit(
+                    identifier,
+                    saved.turn,
+                    "s4_retry_started",
+                    {"retry_count": saved.s4_retry_count, "failed_stage": "s4_compare"},
+                )
+            finally:
+                receipt_context.reset(token)
+        return await self._dispatch(job, saved)
+
+    async def retry_s4(
+        self, identifier: UUID, *, expected_turn: int, expected_revision: int, idempotency_key: str
+    ) -> ConsultationSnapshot:
+        """只从合法 S4 失败快照重建运行意图，图状态继续自 S3 Checkpoint。"""
+        self._require_workflow()
+        if not idempotency_key.strip():
+            raise InvalidBusinessRequestError("S4 重试必须提供幂等键")
+        key = f"retry-s4:{identifier}:{idempotency_key}"
+        digest = hashlib.sha256(
+            f"{identifier}:{expected_turn}:{expected_revision}".encode()
+        ).hexdigest()
+        async with self.repository.runtime.mutex("business:" + str(identifier)):
+            receipt = await self.repository.runtime.read("receipt", key)
+            if receipt:
+                if receipt["digest"] != digest:
+                    raise InvalidStateTransitionError("幂等键已用于不同的 S4 重试请求")
+                return ConsultationSnapshot.model_validate(receipt["result"])
+            current = await self.repository.get(identifier)
+            if (
+                current.status != "failed"
+                or current.failed_stage != "s4_compare"
+                or current.result_presentation != "s3_retrieval_only"
+                or not current.retryable
+                or current.turn != expected_turn
+                or current.revision != expected_revision
+                or current.retrieval is None
+            ):
+                raise InvalidStateTransitionError("当前会诊没有可恢复的 S4 Checkpoint")
+            pending = current.model_copy(
+                update={
+                    "status": "running",
+                    "turn": current.turn + 1,
+                    "paused_at": None,
+                    "failure_code": None,
+                    "failed_stage": None,
+                    "result_presentation": "none",
+                    "retryable": False,
+                    "s4_retry_count": current.s4_retry_count + 1,
+                }
+            )
+            job = RunJob(
+                consultation_id=identifier,
+                turn=pending.turn,
+                retry_s4=True,
+                idempotency_key=idempotency_key,
+            )
+            token = receipt_context.set((key, digest))
+            try:
+                saved = await self.repository.save(
+                    pending,
+                    expected_turn=current.turn,
+                    runtime_records=[("job", str(job.run_id), job.model_dump(mode="json"))],
+                )
             finally:
                 receipt_context.reset(token)
         return await self._dispatch(job, saved)

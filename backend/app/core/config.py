@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     llm_temperature: float = Field(default=0.1, ge=0, le=2, description="LLM 采样温度")
     llm_timeout_seconds: float = Field(default=60.0, gt=0, description="LLM 请求超时")
     llm_max_retries: int = Field(default=2, ge=0, le=5, description="LLM 有限重试次数")
+    s4_total_seconds: float = Field(default=110.0, gt=0, description="S4 流式总预算")
+    s4_first_content_seconds: float = Field(default=40.0, gt=0, description="S4 首个正文预算")
+    s4_idle_seconds: float = Field(default=25.0, gt=0, description="S4 连续无正文进展预算")
+    s4_max_output_tokens: int = Field(
+        default=3000, ge=256, le=16000, description="S4 最大输出 token"
+    )
+    s4_connect_timeout_seconds: float = Field(default=10.0, gt=0, description="S4 建连预算")
     knowledge_qa_mode: Literal["extractive", "llm"] = Field(
         default="extractive",
         description="独立 QA 来源摘录或结构化模型选择摘录；失败不静默降级",
@@ -186,6 +193,8 @@ class Settings(BaseSettings):
             raise ValueError("向量距离必须为 COSINE、IP 或 L2")
         if self.reranker_timeout_seconds <= 0:
             raise ValueError("Reranker 超时必须大于零")
+        if self.s4_first_content_seconds > self.s4_total_seconds:
+            raise ValueError("S4 首正文预算不得超过总预算")
         if (
             min(
                 self.milvus_hnsw_m,

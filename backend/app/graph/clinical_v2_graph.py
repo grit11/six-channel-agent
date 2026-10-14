@@ -27,7 +27,7 @@ from backend.app.clinical_v2.schemas import (
     RetrievalBundleV2,
 )
 from backend.app.core.exceptions import InvalidStateTransitionError
-from backend.app.core.ports import StructuredLLM
+from backend.app.core.ports import S4StreamPolicy, StructuredLLM
 from backend.app.knowledge.service import KnowledgeService
 from backend.app.observability.progress import emit_progress, stage_scope
 
@@ -59,6 +59,7 @@ def build_clinical_v2_graph(
     max_clarification_rounds: int = 3,
     retrieval_top_k: int = 20,
     differential_top_k: int = 10,
+    s4_policy: S4StreamPolicy | None = None,
 ) -> CompiledStateGraph:
     """构建完整五阶段与人工中断；未接检索时显式未决，绝不伪造方证。"""
 
@@ -135,6 +136,7 @@ def build_clinical_v2_graph(
                 knowledge,
                 llm,
                 differential_top_k=differential_top_k,
+                s4_policy=s4_policy,
             )
         return {
             "comparison": comparison.model_dump(mode="json"),

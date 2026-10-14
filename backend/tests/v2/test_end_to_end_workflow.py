@@ -12,8 +12,14 @@ from backend.app.clinical_v2.schemas import (
     ComparisonV2,
     S1ExtractionDraft,
 )
+from backend.app.core.exceptions import S4StreamError
+from backend.app.core.ports import S4StreamPolicy
 from backend.app.graph.clinical_v2_graph import build_clinical_v2_graph
+from backend.app.persistence.repositories import InMemoryConsultationRepository
 from backend.app.schemas.evidence import Evidence
+from backend.app.services.clinical_v2_service import ClinicalV2Service
+from backend.app.services.consultation_service import ConsultationService
+from backend.app.services.runtime_service import ReliableRuntime
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -166,6 +172,20 @@ class FullLLM:
         )
 
 
+class FailingS4LLM(FullLLM):
+    """只让 S4 流式调用失败，用于验证 S3 兜底和单阶段恢复。"""
+
+    def __init__(self) -> None:
+        """记录流式调用次数，确认 S1/S2 不会随重试重复执行。"""
+        super().__init__()
+        self.stream_calls = 0
+
+    async def ainvoke_structured_stream(self, messages, schema, *, policy, on_progress=None):
+        """模拟 S4 阶段超时，不返回伪造比较结果。"""
+        self.stream_calls += 1
+        raise S4StreamError("测试 S4 失败", failure_code="S4_STAGE_TIMEOUT")
+
+
 async def test_s1_to_s5_review_resume(tmp_path: Path) -> None:
     """完整链路进入 S5 后暂停，医生 accept 才变成 completed。"""
     llm = FullLLM()
@@ -194,3 +214,36 @@ async def test_s1_to_s5_review_resume(tmp_path: Path) -> None:
         assert completed["review"]["action"] == "accept"
         assert not (await graph.aget_state(config)).next
         assert llm.calls == ["S1ExtractionDraft", "ChannelLocalizationV2", "ComparisonV2"]
+
+
+async def test_s4_failure_publishes_read_only_fallback(tmp_path: Path) -> None:
+    """S4 失败保留真实 S3 候选，重试只恢复 S4，不重跑前置节点。"""
+    llm = FailingS4LLM()
+    repo = InMemoryConsultationRepository()
+    async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "fallback.sqlite")) as saver:
+        workflow = ClinicalV2Service(
+            llm,
+            saver,
+            FakeKnowledge(),
+            s4_policy=S4StreamPolicy(total_seconds=2, first_content_seconds=1, idle_seconds=1),
+        )
+        service = ConsultationService(repo, workflow, run_mode="sync")
+        service.runtime = ReliableRuntime(service)
+        failed = await service.create("发热")
+        assert failed.status == "failed"
+        assert failed.result_presentation == "s3_retrieval_only"
+        assert failed.failed_stage == "s4_compare"
+        assert failed.comparison is None
+        assert failed.retrieval and failed.retrieval.formula_candidates
+        assert failed.retryable is True
+        assert llm.calls == ["S1ExtractionDraft", "ChannelLocalizationV2"]
+        retry = await service.retry_s4(
+            failed.consultation_id,
+            expected_turn=failed.turn,
+            expected_revision=failed.revision,
+            idempotency_key="retry-1",
+        )
+        assert retry.status == "failed"
+        assert retry.result_presentation == "s3_retrieval_only"
+        assert llm.calls == ["S1ExtractionDraft", "ChannelLocalizationV2"]
+        assert llm.stream_calls == 2
