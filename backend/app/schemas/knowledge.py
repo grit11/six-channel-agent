@@ -1,6 +1,7 @@
 """知识加载与查询契约，仅表示来源事实，不表达患者诊断。"""
 
 import hashlib
+from datetime import datetime
 from typing import Literal, Self
 from uuid import UUID
 
@@ -207,6 +208,7 @@ class KnowledgeChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     message: str = Field(min_length=1, max_length=4000, description="医生知识问题")
     session_id: UUID | None = Field(default=None, description="QA 临时会话 ID")
+    client_message_id: UUID | None = Field(default=None, description="QA 单轮幂等键")
 
 
 class QACitation(BaseModel):
@@ -239,7 +241,10 @@ class QAUsage(BaseModel):
     model_config = ConfigDict(extra="forbid")
     input_tokens: int | None = None
     output_tokens: int | None = None
-    status: Literal["available", "unavailable"] = "unavailable"
+    status: Literal["available", "partial", "unavailable"] = "unavailable"
+    llm_calls: int = 0
+    covered_calls: int = 0
+    time_to_first_token_ms: int | None = None
 
 
 class KnowledgeChatResponse(BaseModel):
@@ -249,11 +254,75 @@ class KnowledgeChatResponse(BaseModel):
     session_id: UUID
     turn_id: UUID
     status: Literal["answered", "partial", "no_evidence"]
+    grounding_status: Literal["grounded", "partial", "ungrounded"] = Field(
+        default="grounded", description="回答与本地知识库证据的接地状态"
+    )
+    grounding_notice: str | None = Field(
+        default=None, description="未接地或部分接地时向医生公开的证据边界说明"
+    )
     answer: str
     citations: list[QACitation] = Field(default_factory=list)
     sources: list[QASourceCard] = Field(default_factory=list)
     missing_evidence: list[str] = Field(default_factory=list)
     tools_used: list[str] = Field(default_factory=list)
+    tool_audit: dict[str, int] = Field(
+        default_factory=dict, description="本轮工具次数、缓存和实际读取尝试"
+    )
     knowledge_version: str
     usage: QAUsage = Field(default_factory=QAUsage)
     duration_ms: int = Field(ge=0)
+
+
+class QASession(BaseModel):
+    """QA 独立会话元数据；归属只由可信服务端主体填写。"""
+
+    model_config = ConfigDict(extra="forbid")
+    session_id: UUID
+    owner_id: str
+    title: str = Field(max_length=160)
+    status: Literal["active", "archived", "deleted"] = "active"
+    revision: int = 0
+    next_sequence: int = 1
+    active_turn_id: UUID | None = None
+    knowledge_version: str
+    storage: Literal["memory", "postgres"]
+    created_at: datetime
+    updated_at: datetime
+
+
+class QAMessage(BaseModel):
+    """QA 持久消息与运行状态；失败 assistant 无未核验正文。"""
+
+    model_config = ConfigDict(extra="forbid")
+    message_id: UUID
+    session_id: UUID
+    sequence: int
+    role: Literal["user", "assistant"]
+    content: str
+    client_message_id: UUID
+    request_digest: str
+    status: Literal["pending", "running", "completed", "partial", "failed", "interrupted"]
+    response: KnowledgeChatResponse | None = None
+    error_code: str | None = None
+    knowledge_version: str
+    model_id: str
+    prompt_digest: str
+    expires_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+class QASessionCreate(BaseModel):
+    """新会话标题，无客户端 owner 输入。"""
+
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(default="知识会话", min_length=1, max_length=160)
+
+
+class QASessionPatch(BaseModel):
+    """基于乐观版本重命名或归档。"""
+
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=0)
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    status: Literal["active", "archived"] | None = None

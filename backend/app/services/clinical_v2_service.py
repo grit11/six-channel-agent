@@ -1,5 +1,6 @@
 """V2 图适配边界：运行唯一临床图、恢复人工暂停，不替代业务 Repository。"""
 
+import asyncio
 from collections.abc import Mapping
 from typing import Any, cast
 from uuid import uuid4
@@ -52,6 +53,61 @@ class ClinicalV2Service:
     async def parse(self, text: str) -> ClinicalEvidenceV2:
         """只执行 S1，不创建会诊、不执行 S2/RAG。"""
         return await extract_clinical_facts(text, self.llm)
+
+    @property
+    def runtime_digest(self) -> str:
+        """读取当前模型和资源指纹，测试替身使用明确的类型标识。"""
+        return str(getattr(self.llm, "clinical_runtime_digest", type(self.llm).__qualname__))
+
+    async def clinical_failure_result(
+        self, consultation_id: str, failure_code: str, raw_input: str, revision: int
+    ) -> dict[str, Any] | None:
+        """仅从已提交 checkpoint 提取上游事实，禁止存储流片段。"""
+        checkpoint = await self.graph.aget_state(self._config(consultation_id))
+        state = checkpoint.values
+        if not state or len(checkpoint.next) != 1:
+            return None
+        stage = checkpoint.next[0]
+        if stage not in {"s1_extract", "s2_localize"}:
+            return None
+        if state.get("clinical_text") != raw_input or state.get("revision", 0) != revision:
+            return None
+        if stage == "s2_localize":
+            evidence = ClinicalEvidenceV2.model_validate(state.get("clinical_evidence"))
+            if evidence.raw_text != raw_input or evidence.doctor_revision != revision:
+                raise InvalidStateTransitionError("S2 上游事实版本不匹配")
+        return {
+            "status": "failed",
+            "failure_code": failure_code,
+            "failed_stage": stage,
+            "retryable": True,
+            "revision": revision,
+            "clinical_evidence": state.get("clinical_evidence") if stage == "s2_localize" else None,
+            "localization": None,
+            "retrieval": None,
+            "comparison": None,
+            "clinical_runtime_digest": await asyncio.to_thread(lambda: self.runtime_digest),
+        }
+
+    async def validate_clinical_checkpoint(
+        self,
+        consultation_id: str,
+        stage: str,
+        raw_input: str,
+        revision: int,
+        runtime_digest: str,
+        evidence_json: str | None,
+    ) -> None:
+        """模型、原文、事实与 next 均一致才允许继续同一失败节点。"""
+        if runtime_digest != await asyncio.to_thread(lambda: self.runtime_digest):
+            raise InvalidStateTransitionError("模型或 Prompt 版本变化，拒绝复用恢复点")
+        state = await self.clinical_failure_result(consultation_id, "RETRY", raw_input, revision)
+        if state is None or state["failed_stage"] != stage:
+            raise InvalidStateTransitionError("当前图没有可证明安全的阶段恢复点")
+        if stage == "s2_localize":
+            saved = ClinicalEvidenceV2.model_validate(state["clinical_evidence"])
+            if saved.model_dump_json() != evidence_json:
+                raise InvalidStateTransitionError("业务事实与 Checkpoint 不一致")
 
     @staticmethod
     def _config(consultation_id: str) -> RunnableConfig:

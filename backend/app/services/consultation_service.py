@@ -228,6 +228,74 @@ class ConsultationService:
                 receipt_context.reset(token)
         return await self._dispatch(job, saved)
 
+    async def retry_clinical_stage(
+        self,
+        identifier: UUID,
+        *,
+        expected_turn: int,
+        expected_revision: int,
+        idempotency_key: str,
+        owner_id: str | None = None,
+    ) -> ConsultationSnapshot:
+        """使用权威失败快照、业务锁和收据继续 S1/S2，绝不重新初始化整图。"""
+        self._require_workflow()
+        key = f"retry-clinical:{identifier}:{idempotency_key}"
+        digest = hashlib.sha256(
+            f"{identifier}:{expected_turn}:{expected_revision}".encode()
+        ).hexdigest()
+        async with self.repository.runtime.mutex("business:" + str(identifier)):
+            current = await self.repository.get(identifier)
+            if (
+                owner_id is not None or current.doctor_id is not None
+            ) and current.doctor_id != owner_id:
+                raise InvalidBusinessRequestError("会诊归属不匹配")
+            receipt = await self.repository.runtime.read("receipt", key)
+            if receipt:
+                if receipt["digest"] != digest:
+                    raise InvalidStateTransitionError("幂等键内容冲突")
+                return ConsultationSnapshot.model_validate(receipt["result"])
+            if (
+                current.status != "failed"
+                or current.failed_stage not in {"s1_extract", "s2_localize"}
+                or not current.retryable
+                or current.turn != expected_turn
+                or current.revision != expected_revision
+            ):
+                raise InvalidStateTransitionError("当前会诊没有可恢复的 S1/S2 失败阶段")
+            assert self.workflow is not None
+            await self.workflow.validate_clinical_checkpoint(
+                str(identifier),
+                current.failed_stage,
+                current.raw_input,
+                current.revision,
+                current.clinical_runtime_digest or "",
+                current.clinical_evidence.model_dump_json() if current.clinical_evidence else None,
+            )
+            pending = current.model_copy(
+                update={
+                    "status": "running",
+                    "turn": current.turn + 1,
+                    "failed_stage": None,
+                    "failure_code": None,
+                    "retryable": False,
+                    "clinical_retry_count": current.clinical_retry_count + 1,
+                    "completed_at": None,
+                }
+            )
+            job = RunJob(
+                consultation_id=identifier, turn=pending.turn, idempotency_key=idempotency_key
+            )
+            token = receipt_context.set((key, digest))
+            try:
+                saved = await self.repository.save(
+                    pending,
+                    expected_turn=current.turn,
+                    runtime_records=[("job", str(job.run_id), job.model_dump(mode="json"))],
+                )
+            finally:
+                receipt_context.reset(token)
+        return await self._dispatch(job, saved)
+
     @staticmethod
     def _validate_command(snapshot: ConsultationSnapshot, command: HumanGraphCommandV2) -> None:
         """软件契约校验；不依据医学词项改变模型候选。"""

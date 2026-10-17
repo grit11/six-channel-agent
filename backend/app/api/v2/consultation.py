@@ -33,6 +33,23 @@ class RetryS4Request(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=128)
 
 
+@router.post("/{consultation_id}/retry-stage", response_model=ConsultationSnapshot)
+async def retry_stage(
+    request: Request, consultation_id: UUID, payload: RetryS4Request
+) -> ConsultationSnapshot:
+    """研发无身份仅限合成病例；生产必须注入可信 owner 后核验会诊归属。"""
+    owner = getattr(request.state, "owner_id", None)
+    if request.app.state.container.settings.app_env == "prod" and not owner:
+        raise InvalidBusinessRequestError("阶段重试需要可信身份")
+    return await request.app.state.container.consultation_service.retry_clinical_stage(
+        consultation_id,
+        expected_turn=payload.expected_turn,
+        expected_revision=payload.expected_revision,
+        idempotency_key=payload.idempotency_key,
+        owner_id=owner,
+    )
+
+
 @router.post("", response_model=ConsultationSnapshot)
 async def create(
     request: Request,

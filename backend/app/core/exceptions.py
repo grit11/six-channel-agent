@@ -42,13 +42,38 @@ class S4StreamError(ProviderUnavailableError):
         failure_code: str,
         http_status: int | None = None,
         error_category: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        response_format_enabled: bool | None = None,
+        stream_options_enabled: bool | None = None,
+        finish_reason: str | None = None,
+        saw_done: bool | None = None,
+        content_chars: int | None = None,
+        thinking_type: str | None = None,
+        reasoning_effort: str | None = None,
+        provider_error_code: str | None = None,
+        provider_error_param: str | None = None,
     ) -> None:
-        """保存稳定分类；不携带请求正文、部分 JSON 或患者信息。"""
+        """保存稳定分类和安全传输元数据；不携带正文、部分 JSON 或患者信息。"""
         details: dict[str, object] = {"failure_code": failure_code}
-        if http_status is not None:
-            details["http_status"] = http_status
-        if error_category is not None:
-            details["error_category"] = error_category
+        optional = {
+            "http_status": http_status,
+            "error_category": error_category,
+            "provider": provider,
+            "model": model,
+            "response_format_enabled": response_format_enabled,
+            "stream_options_enabled": stream_options_enabled,
+            "finish_reason": finish_reason,
+            "saw_done": saw_done,
+            "content_chars": content_chars,
+            "thinking_type": thinking_type,
+            "reasoning_effort": reasoning_effort,
+            "provider_error_code": provider_error_code,
+            "provider_error_param": provider_error_param,
+        }
+        for key, value in optional.items():
+            if value is not None:
+                details[key] = value
         super().__init__(message, details=details)
         self.failure_code = failure_code
 

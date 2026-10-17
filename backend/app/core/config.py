@@ -31,9 +31,22 @@ class Settings(BaseSettings):
     llm_base_url: str = Field(default="", description="llm_base_url 配置值")
     llm_api_key: SecretStr = Field(default=SecretStr(""), description="llm_api_key 敏感配置")
     llm_model: str = Field(default="", description="llm_model 配置值")
+    llm_reasoning_effort: Literal["", "low", "high", "max"] = Field(
+        default="", description="GLM-5.3 推理强度；空值沿用供应商默认，仅对已支持型号发送"
+    )
     llm_temperature: float = Field(default=0.1, ge=0, le=2, description="LLM 采样温度")
     llm_timeout_seconds: float = Field(default=60.0, gt=0, description="LLM 请求超时")
     llm_max_retries: int = Field(default=2, ge=0, le=5, description="LLM 有限重试次数")
+    clinical_stream_enabled: bool = Field(default=True, description="S1/S2 流式；关闭显式对照")
+    s1_total_seconds: float = Field(default=180, gt=0, description="S1 含来源修复的总预算")
+    s2_total_seconds: float = Field(default=180, gt=0, description="S2 阶段总预算")
+    clinical_first_content_seconds: float = Field(default=90, gt=0, description="S1/S2 首正文预算")
+    clinical_idle_seconds: float = Field(default=60, gt=0, description="S1/S2 正文空闲预算")
+    qa_storage: Literal["auto", "memory", "postgres"] = Field(
+        default="auto", description="QA 独立历史"
+    )
+    qa_total_seconds: float = Field(default=180, gt=0, description="QA 整轮预算")
+    qa_context_tokens: int = Field(default=3500, ge=500, description="QA 历史软上下文预算")
     s4_total_seconds: float = Field(default=110.0, gt=0, description="S4 流式总预算")
     s4_first_content_seconds: float = Field(default=40.0, gt=0, description="S4 首个正文预算")
     s4_idle_seconds: float = Field(default=25.0, gt=0, description="S4 连续无正文进展预算")

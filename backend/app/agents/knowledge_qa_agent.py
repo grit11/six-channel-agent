@@ -4,14 +4,17 @@
 边界：不读取临床状态、不编排 QA StateGraph、不生成无来源诊断、处方或剂量。
 """
 
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any, cast
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from backend.app.agents.knowledge_qa_tools import (
     EvidenceRegistry,
@@ -23,6 +26,21 @@ from backend.app.knowledge.service import KnowledgeService
 PROMPT_PATH = Path(__file__).parent / "prompts" / "knowledge_qa_v2.md"
 
 
+def visible_text(content: object) -> str:
+    """只读取标准正文块，忽略 reasoning、工具参数和未知扩展字段。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            item["text"]
+            for item in content
+            if isinstance(item, dict)
+            and item.get("type") == "text"
+            and isinstance(item.get("text"), str)
+        )
+    return ""
+
+
 @dataclass
 class AgentTurnResult:
     """Agent 单轮输出和工具审计数据。"""
@@ -31,6 +49,9 @@ class AgentTurnResult:
     registry: EvidenceRegistry
     messages: list[Any]
     usage: dict[str, int | None]
+    llm_calls: int = 0
+    covered_calls: int = 0
+    time_to_first_token_ms: int | None = None
 
 
 class KnowledgeQAAgent:
@@ -47,14 +68,19 @@ class KnowledgeQAAgent:
         return self.model is not None
 
     async def run(
-        self, message: str, history: list[dict[str, str]] | None = None
+        self,
+        message: str,
+        history: list[dict[str, str]] | None = None,
+        *,
+        on_event: Callable[[str, dict[str, object]], Awaitable[None]] | None = None,
     ) -> AgentTurnResult:
         """执行一轮受预算限制的 RAG 问答并保留本轮真实来源。"""
         if self.model is None:
             raise RuntimeError("QA ChatModel 未配置")
         registry = EvidenceRegistry(self.knowledge.version)
+        registry.on_event = on_event
         factory = KnowledgeToolFactory(self.knowledge, registry)
-        prompt = PROMPT_PATH.read_text(encoding="utf-8")
+        prompt = await asyncio.to_thread(PROMPT_PATH.read_text, encoding="utf-8")
         agent = create_agent(
             self.model,
             tools=factory.build(),
@@ -69,11 +95,34 @@ class KnowledgeQAAgent:
             name="knowledge_qa_v2",
         )
         messages: list[Any] = []
-        for item in (history or [])[-8:]:
+        for item in (history or [])[-12:]:
             messages.append({"role": item["role"], "content": item["content"]})
         messages.append(HumanMessage(content=message))
+        started = perf_counter()
+        ttft = None
         try:
-            result = await agent.ainvoke({"messages": messages})
+            if on_event is None:
+                result = await agent.ainvoke({"messages": messages})
+            else:
+                # astream_events 只发布正文 content；reasoning/tool 参数及外部工具文本不外传。
+                # on_chain_end 的最终消息是权威结果，增量只属于临时 UI。
+                result = {}
+                async for event in agent.astream_events({"messages": messages}, version="v2"):
+                    if event["event"] == "on_chat_model_stream":
+                        chunk = event["data"].get("chunk")
+                        text = visible_text(getattr(chunk, "content", None))
+                        if (
+                            isinstance(text, str)
+                            and text
+                            and not getattr(chunk, "tool_call_chunks", None)
+                        ):
+                            if ttft is None:
+                                ttft = int((perf_counter() - started) * 1000)
+                            await on_event("qa.answer_delta", {"text": text, "provisional": True})
+                    if event["event"] == "on_chain_end" and not event.get("parent_ids"):
+                        output = event["data"].get("output")
+                        if isinstance(output, dict):
+                            result = output
         except QAError:
             raise
         except TimeoutError as exc:
@@ -90,16 +139,50 @@ class KnowledgeQAAgent:
         output_messages = list(result.get("messages", []))
         answer = ""
         usage: dict[str, int | None] = {"input_tokens": None, "output_tokens": None}
-        for item in reversed(output_messages):
-            content = getattr(item, "content", None)
-            if isinstance(content, str) and content.strip():
+        # 输出包含传入历史；计费审计和正式回答只取本轮新增消息，避免重复计算旧轮 usage。
+        new_messages = output_messages[len(messages) :]
+        for item in reversed(new_messages):
+            content = visible_text(getattr(item, "content", None))
+            if (
+                isinstance(item, AIMessage)
+                and isinstance(content, str)
+                and content.strip()
+                and not item.tool_calls
+            ):
                 answer = content.strip()
-                metadata = getattr(item, "usage_metadata", None) or {}
-                usage = {
-                    "input_tokens": metadata.get("input_tokens"),
-                    "output_tokens": metadata.get("output_tokens"),
-                }
                 break
+        seen: set[str] = set()
+        calls = covered = 0
+        if not answer:
+            raise QAError("QA_PROVIDER_RESPONSE_INVALID", "模型未返回可核验的完整回答")
+        for index, item in enumerate(new_messages):
+            if not isinstance(item, AIMessage):
+                continue
+            identity = str(item.id or f"generation-{index}")
+            if identity in seen:
+                continue
+            seen.add(identity)
+            calls += 1
+            metadata: Mapping[str, object] = item.usage_metadata or {}
+            input_tokens = metadata.get("input_tokens")
+            output_tokens = metadata.get("output_tokens")
+            if (
+                isinstance(input_tokens, int)
+                and not isinstance(input_tokens, bool)
+                and input_tokens >= 0
+                and isinstance(output_tokens, int)
+                and not isinstance(output_tokens, bool)
+                and output_tokens >= 0
+            ):
+                covered += 1
+                usage["input_tokens"] = (usage["input_tokens"] or 0) + input_tokens
+                usage["output_tokens"] = (usage["output_tokens"] or 0) + output_tokens
         return AgentTurnResult(
-            answer=answer, registry=registry, messages=output_messages, usage=usage
+            answer=answer,
+            registry=registry,
+            messages=output_messages,
+            usage=usage,
+            llm_calls=calls,
+            covered_calls=covered,
+            time_to_first_token_ms=ttft,
         )

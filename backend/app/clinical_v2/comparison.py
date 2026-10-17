@@ -2,7 +2,7 @@
 
 本模块只负责 S4 的证据上下文裁剪、结构化模型调用和来源绑定；完整知识记录仍由
 KnowledgeService 按 Evidence ID 提供展开，不在模型请求中重复发送检索 DTO、轨迹和冗余元数据。
-不执行旧 Python 规则、不计算医学分数、不自动改写模型顺序。
+不执行旧 Python 规则、不计算医学分数；仅按模型合法 rank 整理数组，不重判医学优先级。
 """
 
 import asyncio
@@ -209,7 +209,30 @@ async def compare_formula_candidates(
         if isinstance(exc, S4StreamError):
             await emit_progress(
                 "s4_stream_failed",
-                {"failure_code": exc.failure_code, "fallback_available": True},
+                {
+                    "failure_code": exc.failure_code,
+                    "fallback_available": True,
+                    # 仅转发安全传输元数据，便于区分 Provider 参数、SSE 边界和 Schema 失败。
+                    **{
+                        key: exc.details[key]
+                        for key in (
+                            "provider",
+                            "model",
+                            "response_format_enabled",
+                            "stream_options_enabled",
+                            "finish_reason",
+                            "saw_done",
+                            "content_chars",
+                            "http_status",
+                            "error_category",
+                            "thinking_type",
+                            "reasoning_effort",
+                            "provider_error_code",
+                            "provider_error_param",
+                        )
+                        if key in exc.details
+                    },
+                },
             )
             raise ClinicalLLMUnavailableError(
                 "S4 流式模型不可用，无法生成证据比较",
@@ -227,7 +250,15 @@ async def compare_formula_candidates(
     } | {item.evidence_id for item in differential}
     seen_candidates: set[str] = set()
     paths = []
-    for position, path in enumerate(draft.ordered_paths, 1):
+    ordered_paths = draft.ordered_paths
+    if draft.status == "ranked":
+        ranks = [path.rank for path in ordered_paths]
+        expected_ranks = set(range(1, len(ordered_paths) + 1))
+        # 数组位置只是序列化顺序。只接纳模型明确给出的唯一连续排名，不能替模型补名次。
+        if not ranks or None in ranks or set(ranks) != expected_ranks:
+            raise ComparisonUngroundedError("ranked 排名必须从 1 开始且唯一连续，不能缺失或并列")
+        ordered_paths = sorted(ordered_paths, key=lambda path: path.rank or 0)
+    for path in ordered_paths:
         if path.candidate_id not in candidates or path.candidate_id in seen_candidates:
             raise ComparisonUngroundedError("比较结果引用了不存在或重复的方证候选")
         seen_candidates.add(path.candidate_id)
@@ -243,8 +274,6 @@ async def compare_formula_candidates(
         }
         if not set(path.support_evidence_ids) & candidate_sources:
             raise ComparisonUngroundedError("路径缺少当前候选自身的来源支持")
-        if draft.status == "ranked" and path.rank != position:
-            raise ComparisonUngroundedError("路径顺序与 rank 不一致")
         paths.append(path.model_copy(update={"verification_status": "grounded"}))
     if draft.status == "ranked" and not paths:
         raise ComparisonUngroundedError("ranked 结果必须包含至少一条路径")

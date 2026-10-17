@@ -246,12 +246,12 @@
     @media(max-width:880px){.step-row{grid-template-columns:repeat(3,minmax(0,1fr))}.history-paths{grid-template-columns:1fr}.title-actions .badge{display:none}}
     @media(max-width:600px){.step-row{grid-template-columns:repeat(2,minmax(0,1fr))}.step{min-height:142px}.title-actions{max-width:140px}.next-consultation{font-size:10px;padding:10px}.history-detail .panel-head{flex-wrap:wrap}.history-detail-body{padding:0 15px 18px}.review-strip input{min-width:0;width:100%}.page-title{gap:10px}.fact-row{flex-direction:column}.fact-row>div{text-align:left}.review-actions{width:100%}}
 
-    [data-view="knowledge"] .qa2-layout{display:grid;grid-template-columns:190px minmax(0,1fr) 300px;gap:14px;min-height:560px;background:#f6f8f6;border:1px solid #dae5e0;border-radius:16px;padding:14px}
+    [data-view="knowledge"] .qa2-layout{display:grid;grid-template-columns:190px minmax(0,1fr) 300px;gap:14px;height:min(760px,calc(100vh - 190px));min-height:560px;background:#f6f8f6;border:1px solid #dae5e0;border-radius:16px;padding:14px}
     [data-view="knowledge"] .qa2-tabs{display:flex;align-items:center;gap:8px;margin:18px 0 12px}
     [data-view="knowledge"] .qa2-tab{border:1px solid #cbded6;background:#fff;color:#315d54;border-radius:999px;padding:9px 16px;cursor:pointer}
     [data-view="knowledge"] .qa2-tab.active{background:#18846e;color:#fff}
     [data-view="knowledge"] .qa2-status{margin-left:auto;color:#587d70;font-size:12px}
-    [data-view="knowledge"] .qa2-sessions,[data-view="knowledge"] .qa2-sources{background:#fff;border:1px solid #dae5e0;border-radius:12px;padding:14px}
+    [data-view="knowledge"] .qa2-sessions,[data-view="knowledge"] .qa2-sources{background:#fff;border:1px solid #dae5e0;border-radius:12px;padding:14px;min-height:0}
     [data-view="knowledge"] .qa2-temporary{font-size:11px;line-height:1.7;color:#7c9290}
     [data-view="knowledge"] .qa2-chat{display:flex;flex-direction:column;min-width:0}
     [data-view="knowledge"] .qa2-messages{flex:1;overflow:auto;padding:24px 20px}
@@ -267,6 +267,31 @@
     [data-view="knowledge"] .qa2-source-card{padding:12px;margin:10px 0;border:1px solid #dae5e0;border-radius:10px;background:#fbfdfb;cursor:pointer}
     [data-view="knowledge"] .qa2-source-card strong{display:block;color:#315d54;margin-bottom:5px}
     [data-view="knowledge"] .qa2-source-card small{color:#738985}
+    /* QA-only 会话管理和运行提示；不改变临床工作台及历史页面。 */
+    [data-view="knowledge"] .qa2-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px;border-bottom:1px solid #dae5e0}
+    [data-view="knowledge"] .qa2-toolbar strong{flex:1;min-width:100px;overflow-wrap:anywhere}
+    [data-view="knowledge"] .qa2-run-meta{padding:6px 14px;font-size:12px;color:#587d70}
+    [data-view="knowledge"] .qa2-session{display:block;width:100%;padding:10px;margin-top:6px;border:1px solid transparent;border-radius:8px;background:#f6f8f6;text-align:left;overflow-wrap:anywhere;color:#315d54;cursor:pointer;transition:background .16s,border-color .16s,transform .16s,box-shadow .16s}
+    [data-view="knowledge"] .qa2-session.active{border-color:#18846e;border-left:3px solid #18846e;background:#e4f3eb;box-shadow:0 5px 14px rgba(24,132,110,.12);transform:translateX(2px)}
+    [data-view="knowledge"] #qa2Search{width:100%;min-width:0}
+    [data-view="knowledge"] .qa2-answer-sources{display:block;margin-top:8px}
+    [data-view="knowledge"] .qa2-message[data-provisional="true"]{border-style:dashed;opacity:.8}
+    [data-view="knowledge"] .qa2-sources{display:flex;flex-direction:column;overflow:hidden}
+    [data-view="knowledge"] .qa2-source-list{flex:1;min-height:0;overflow-y:auto;padding-right:4px;scrollbar-gutter:stable}
+    [data-view="knowledge"] .qa2-source-card{margin-right:2px}
+    [data-view="knowledge"] .qa2-session-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    [data-view="knowledge"] .qa2-session-title{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    [data-view="knowledge"] .qa2-session-status,[data-view="knowledge"] .qa2-session-time{font-size:11px;color:#718985;white-space:nowrap}
+    [data-view="knowledge"] .qa2-session-time{display:block;margin-top:5px;text-align:left}
+    [data-view="knowledge"] .qa2-session-empty{margin:20px 4px;color:#718985;font-size:13px;text-align:center}
+    [data-view="knowledge"] .qa2-grounding-notice{margin-top:14px;padding:9px 11px;border-left:3px solid #c4843d;background:#fff7e9;color:#79501f;font-size:13px;line-height:1.6}
+    [data-view="knowledge"] .qa2-grounding-notice.partial{border-left-color:#b99842;background:#fffbea}
+
+    [data-view="knowledge"] .qa2-sessions{min-width:0;overflow-y:auto;scrollbar-gutter:stable}
+    [data-view="knowledge"] .qa2-messages{max-height:650px;overflow-wrap:anywhere}
+    [data-view="knowledge"] .qa2-layout[hidden]{display:none}
+    [data-view="knowledge"] button[hidden]{display:none}
+    @media(max-width:1100px){[data-view="knowledge"] .qa2-sessions.qa2-open{display:block;position:fixed;z-index:21;inset:12vh 6vw auto;max-height:70vh;overflow:auto;box-shadow:0 18px 50px rgba(17,46,55,.24)}}
     @media(max-width:1100px){[data-view="knowledge"] .qa2-layout{grid-template-columns:1fr 260px}.qa2-sessions{display:none}}
     @media(max-width:700px){[data-view="knowledge"] .qa2-layout{grid-template-columns:1fr;padding:8px}.qa2-sources{display:none}.qa2-sources.qa2-open{display:block;position:fixed;z-index:20;inset:12vh 6vw auto;padding:14px;max-height:70vh;overflow:auto;box-shadow:0 18px 50px rgba(17,46,55,.24)}.qa2-compose{flex-direction:column}.qa2-compose-actions{width:100%}.qa2-compose-actions button{flex:1;min-height:44px}}
 </style>
@@ -335,9 +360,9 @@
         <div class="page-title"><div><div class="eyebrow">Knowledge Intelligence</div><h1>经典知识问答</h1><p class="subtitle">基于《伤寒论》经典、方证、鉴别资料及历史医案的可追溯知识助手</p></div><span class="badge">QA 临时会话</span></div>
         <div class="qa2-tabs"><button class="qa2-tab active" data-qa2-tab="chat" type="button">知识问答</button><button class="qa2-tab" data-qa2-tab="lookup" type="button">条文速查</button><span id="qa2Status" class="qa2-status" aria-live="polite">等待提问</span></div>
         <div class="qa2-layout">
-          <aside class="qa2-sessions"><button id="qa2New" class="primary-btn" type="button">＋ 新建会话</button><p class="qa2-temporary">临时会话 · 不保存到病历/临床审核</p><div id="qa2SessionList"></div></aside>
-          <section class="qa2-chat"><div id="qa2Messages" class="qa2-messages" aria-live="polite"><div class="qa2-welcome"><h2>从经典证据开始提问</h2><p>回答由真实知识工具检索后生成，并显示可核验来源。</p><button class="qa2-example" type="button">桂枝汤证与麻黄汤证怎样鉴别？</button><button class="qa2-example" type="button">《伤寒论》第35条主要说明什么？</button><button class="qa2-example" type="button">合病与并病在六经辨证中有什么不同？</button></div></div><div class="qa2-compose"><textarea id="qa2Input" rows="3" placeholder="输入关于经典、方证或鉴别的知识问题"></textarea><div class="qa2-compose-actions"><button id="qa2SourceToggle" class="outline-btn" type="button">查看来源</button><button id="qa2Send" class="primary-btn" type="button">发送</button></div></div></section>
-          <aside class="qa2-sources"><div class="panel-head"><div><h3>本轮引用来源</h3><span class="section-sub">Evidence Registry</span></div></div><div id="qa2Sources" class="qa2-source-list"><p class="small-empty">本轮尚未检索到来源</p></div></aside>
+          <aside class="qa2-sessions"><button id="qa2HistoryClose" type="button" class="text-link">关闭历史</button><button id="qa2New" class="primary-btn" type="button">＋ 新建会话</button><p id="qa2Storage" class="qa2-temporary">QA 独立历史 · 不保存到病历/临床审核</p><input id="qa2Search" aria-label="搜索知识会话" placeholder="搜索会话标题"><div id="qa2SessionList"></div><button id="qa2MoreSessions" type="button" class="text-link" hidden>加载更多会话</button></aside>
+          <section class="qa2-chat"><div class="qa2-toolbar"><strong id="qa2Title">新知识会话</strong><button id="qa2HistoryToggle" class="text-link" type="button">历史会话</button><button id="qa2Rename" class="text-link" type="button" disabled>重命名</button><button id="qa2Archive" class="text-link" type="button" disabled>归档</button><button id="qa2Delete" class="text-link" type="button" disabled>删除</button></div><div id="qa2Messages" class="qa2-messages" aria-live="polite"><div class="qa2-welcome"><h2>从经典证据开始提问</h2><p>回答由真实知识工具检索后生成，并显示可核验来源。</p><button class="qa2-example" type="button">桂枝汤证与麻黄汤证怎样鉴别？</button><button class="qa2-example" type="button">《伤寒论》第35条主要说明什么？</button><button class="qa2-example" type="button">合病与并病在六经辨证中有什么不同？</button></div></div><button id="qa2MoreMessages" class="text-link" type="button" hidden>加载后续历史消息</button><div class="qa2-run-meta"><span id="qa2Usage"></span><button id="qa2Check" type="button" class="text-link" hidden>查询状态</button><button id="qa2Retry" type="button" class="text-link" hidden>重新运行</button></div><div class="qa2-compose"><textarea id="qa2Input" rows="3" aria-label="知识问题" placeholder="输入关于经典、方证或鉴别的知识问题"></textarea><div class="qa2-compose-actions"><button id="qa2SourceToggle" class="outline-btn" type="button">查看来源</button><button id="qa2Stop" class="outline-btn" type="button" hidden>停止生成</button><button id="qa2Send" class="primary-btn" type="button">发送</button></div></div></section>
+          <aside class="qa2-sources"><button id="qa2SourceClose" type="button" class="text-link">关闭来源</button><div class="panel-head"><div><h3>本轮引用来源</h3><span class="section-sub">Evidence Registry</span></div></div><div id="qa2Sources" class="qa2-source-list"><p class="small-empty">本轮尚未检索到来源</p></div></aside>
         </div>
         <div class="qa2-lookup" hidden><div class="k-search"><input id="knowledgeQuery" placeholder="试试：35 / 麻黄汤 / 无汗 / 往来寒热" value="麻黄汤"><button id="knowledgeSearch" type="button" class="primary-btn">搜索经典条文 →</button></div><p class="subtitle" id="knowledgeStatus" style="margin-bottom:15px">等待搜索…</p><div id="knowledgeResults" class="k-results"></div></div>
       </section>

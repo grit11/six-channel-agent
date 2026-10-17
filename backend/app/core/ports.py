@@ -61,6 +61,31 @@ class StructuredLLM(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class ClinicalStageStreamPolicy:
+    """S1/S2 独立工程预算，无输出 token 截断，不改变医学消息。"""
+
+    total_seconds: float = 180.0
+    first_content_seconds: float = 90.0
+    idle_seconds: float = 60.0
+    connect_timeout_seconds: float = 10.0
+
+
+class ClinicalStreamingLLM(Protocol):
+    """临床入口独立流端口，S4 继续使用原端口。"""
+
+    async def ainvoke_clinical_structured_stream(
+        self,
+        messages: list[dict[str, str]],
+        schema: type[StructuredResult],
+        *,
+        stage: str,
+        deadline: float | None = None,
+    ) -> StructuredResult:
+        """仅完整流结束并通过原 Schema 才返回结果。"""
+        ...
+
+
 class EmbeddingProvider(Protocol):
     """向量化抽象，具体模型在 Phase 1 由工厂配置。"""
 

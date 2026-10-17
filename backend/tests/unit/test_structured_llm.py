@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict
 
 from backend.app.core.config import Settings
 from backend.app.core.exceptions import ProviderUnavailableError, S4StreamError
-from backend.app.core.llm import HTTPStructuredLLM
+from backend.app.core.llm import HTTPStructuredLLM, build_llm_provider_options
 from backend.app.core.ports import S4StreamPolicy
 
 
@@ -26,6 +26,17 @@ def settings(retries: int = 0) -> Settings:
         llm_base_url="https://model.test/v1",
         llm_model="test",
         llm_max_retries=retries,
+    )
+
+
+def glm_settings(model: str = "glm-5.3-flash") -> Settings:
+    """构造智谱兼容端点配置，验证可选 OpenAI 扩展不会发送。"""
+    return Settings(
+        _env_file=None,
+        llm_base_url="https://open.bigmodel.cn/api/paas/v4/",
+        llm_model=model,
+        llm_reasoning_effort="low",
+        llm_max_retries=0,
     )
 
 
@@ -107,12 +118,82 @@ async def test_s4_stream_parses_delta_usage_and_done() -> None:
         payload = json.loads(request.content)
         assert payload["stream"] is True
         assert payload["stream_options"]["include_usage"] is True
+        assert "thinking" not in payload
+        assert "reasoning_effort" not in payload
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
 
     async with httpx.AsyncClient(
         base_url="https://model.test/v1/", transport=httpx.MockTransport(handle)
     ) as client:
         result = await HTTPStructuredLLM(settings(), client).ainvoke_structured_stream(
+            [],
+            Payload,
+            policy=S4StreamPolicy(total_seconds=2, first_content_seconds=1, idle_seconds=1),
+        )
+    assert result == Payload(value=7)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["glm-5.3", "glm-5.3-flash", "glm-5.3-flashx"])
+async def test_glm_s4_stream_uses_required_thinking_mode(model: str) -> None:
+    """GLM-5.3 全系列只能开启思考，使用 low 并验证最终 JSON。"""
+    body = (
+        'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'
+        'data: {"choices":[{"delta":{"content":"{\\"value\\":7}"},'
+        '"finish_reason":"stop"}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        """确保 GLM 不收到未声明的 response_format/stream_options。"""
+        payload = json.loads(request.content)
+        assert payload["stream"] is True
+        assert "response_format" not in payload
+        assert "stream_options" not in payload
+        assert payload["thinking"] == {"type": "enabled"}
+        assert payload["reasoning_effort"] == "low"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    async with httpx.AsyncClient(
+        base_url="https://open.bigmodel.cn/api/paas/v4/", transport=httpx.MockTransport(handle)
+    ) as client:
+        result = await HTTPStructuredLLM(glm_settings(model), client).ainvoke_structured_stream(
+            [],
+            Payload,
+            policy=S4StreamPolicy(total_seconds=2, first_content_seconds=1, idle_seconds=1),
+        )
+    assert result == Payload(value=7)
+
+
+@pytest.mark.asyncio
+async def test_other_glm_models_do_not_receive_unverified_thinking_options() -> None:
+    """旧 GLM 型号及未知模型不根据端点域名猜测思考参数能力。"""
+    async with httpx.AsyncClient() as client:
+        adapter = HTTPStructuredLLM(glm_settings("glm-4-flash-250414"), client)
+        assert build_llm_provider_options(adapter._settings) == {}
+
+
+@pytest.mark.asyncio
+async def test_glm_s4_stream_reads_content_parts_without_reasoning_content() -> None:
+    """智谱可能以内容片段数组返回正文；解析器只合并 text，不采集隐藏推理。"""
+    body = (
+        'data: {"choices":[{"delta":{"content":[{"type":"text","text":"{\\"value\\":"}]}}]}\n\n'
+        'data: {"choices":[{"delta":{"content":[{"type":"text","text":"7}"}]},'
+        '"finish_reason":"stop","reasoning_content":"hidden"}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        """返回分段正文事件，确认请求使用智谱支持的思考模式。"""
+        payload = json.loads(request.content)
+        assert payload["thinking"] == {"type": "enabled"}
+        assert payload["reasoning_effort"] == "low"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    async with httpx.AsyncClient(
+        base_url="https://open.bigmodel.cn/api/paas/v4/", transport=httpx.MockTransport(handle)
+    ) as client:
+        result = await HTTPStructuredLLM(glm_settings(), client).ainvoke_structured_stream(
             [],
             Payload,
             policy=S4StreamPolicy(total_seconds=2, first_content_seconds=1, idle_seconds=1),
@@ -220,3 +301,45 @@ async def test_s4_stream_classifies_unsupported_request() -> None:
             )
     assert caught.value.failure_code == "S4_PROVIDER_UNAVAILABLE"
     assert caught.value.details["http_status"] == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["json", "text", "oversized"])
+async def test_s4_http_error_retains_safe_metadata_without_body_or_retry(kind: str) -> None:
+    """400 错误保留数值错误码和参数名，日志不能携带响应回显的密钥或病历。"""
+    calls = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        """模拟 GLM 参数拒绝及不能解析的网关错误。"""
+        nonlocal calls
+        calls += 1
+        if kind == "text":
+            return httpx.Response(400, text="private-patient sk-private")
+        if kind == "oversized":
+            return httpx.Response(400, content=b"private" * 4096)
+        return httpx.Response(
+            400,
+            json={"error": {"code": "1210", "message": "thinking: private-patient sk-private"}},
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://open.bigmodel.cn/api/paas/v4/", transport=httpx.MockTransport(handle)
+    ) as client:
+        with pytest.raises(S4StreamError) as caught:
+            await HTTPStructuredLLM(glm_settings("glm-5.3"), client).ainvoke_structured_stream(
+                [],
+                Payload,
+                policy=S4StreamPolicy(total_seconds=2, first_content_seconds=1, idle_seconds=1),
+            )
+    details = caught.value.details
+    assert calls == 1
+    assert details["http_status"] == 400
+    assert details["thinking_type"] == "enabled"
+    assert details["reasoning_effort"] == "low"
+    if kind == "json":
+        assert details["provider_error_code"] == "1210"
+        assert details["provider_error_param"] == "thinking"
+    else:
+        assert "provider_error_code" not in details
+    assert "private-patient" not in str(details)
+    assert "sk-private" not in str(details)

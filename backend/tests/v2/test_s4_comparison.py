@@ -8,8 +8,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from backend.app.clinical_v2.comparison import _clip_text, compare_formula_candidates
+from backend.app.clinical_v2.comparison import (
+    ComparisonUngroundedError,
+    _clip_text,
+    compare_formula_candidates,
+)
 from backend.app.clinical_v2.schemas import (
+    CandidateComparisonV2,
     ChannelLocalizationV2,
     ClinicalEvidenceV2,
     ComparisonV2,
@@ -314,3 +319,84 @@ def test_excerpt_does_not_cut_incomplete_conditions() -> None:
     assert excerpt.startswith("第一句。")
     assert "未展示内容不等于不存在" in excerpt
     assert "若甲" not in excerpt
+
+
+def ranked_result(ranks: list[int | None], status: str = "ranked") -> ComparisonV2:
+    """用真实候选和来源构造排名草稿，不包含模型外的医学评分。"""
+    _, _, retrieval = setup()
+    paths = [
+        CandidateComparisonV2(
+            path_id=f"p-{candidate.candidate_id}",
+            candidate_id=candidate.candidate_id,
+            six_channels=["太阳"],
+            formula_name=candidate.formula_name,
+            rank=rank,
+            support_fact_ids=["fact-a"],
+            counter_fact_ids=[],
+            missing_dimensions=[],
+            support_evidence_ids=[candidate.source_evidence[0].evidence_id],
+            counter_evidence_ids=[],
+            brief_rationale="模型给出的优先级",
+            differential_summary="测试结构一致性",
+            verification_status="pending",
+        )
+        for candidate, rank in zip(retrieval.formula_candidates, ranks, strict=False)
+    ]
+    return ComparisonV2.model_validate({"status": status, "ordered_paths": paths})
+
+
+async def test_s4_orders_serialized_paths_by_model_rank_without_mutating_draft() -> None:
+    """数组按候选顺序而 rank 相反时，忠实采用模型 rank，且不改写原始草稿。"""
+    evidence, localization, retrieval = setup()
+    draft = ranked_result([2, 1])
+    original = draft.model_dump()
+    knowledge = AsyncMock()
+    knowledge.search_differential.return_value = []
+    result = await compare_formula_candidates(
+        evidence, localization, retrieval, knowledge, ComparisonLLM(draft)
+    )
+    assert [path.candidate_id for path in result.ordered_paths] == ["cb", "ca"]
+    assert [path.rank for path in result.ordered_paths] == [1, 2]
+    assert all(path.verification_status == "grounded" for path in result.ordered_paths)
+    assert draft.model_dump() == original
+    verified = verify_comparison_evidence(result, evidence, retrieval)
+    assert verified == result
+
+
+@pytest.mark.parametrize("ranks", [[], [2], [None], [1, 1], [1, 3], [None, 1]])
+async def test_s4_does_not_invent_missing_or_duplicate_rank(ranks: list[int | None]) -> None:
+    """空排名、缺失、并列、跳号均不能靠数组位置补齐为确定排名。"""
+    evidence, localization, retrieval = setup()
+    knowledge = AsyncMock()
+    knowledge.search_differential.return_value = []
+    with pytest.raises(ComparisonUngroundedError, match="唯一连续"):
+        await compare_formula_candidates(
+            evidence, localization, retrieval, knowledge, ComparisonLLM(ranked_result(ranks))
+        )
+
+
+async def test_s4_rank_normalization_still_rejects_forged_evidence() -> None:
+    """整理 rank 不能绕过来源校验，即使排名合法也拒绝伪造 Evidence ID。"""
+    evidence, localization, retrieval = setup()
+    draft = ranked_result([2, 1])
+    draft.ordered_paths[0].support_evidence_ids = ["forged-source"]
+    knowledge = AsyncMock()
+    knowledge.search_differential.return_value = []
+    with pytest.raises(ComparisonUngroundedError, match="不存在的证据"):
+        await compare_formula_candidates(
+            evidence, localization, retrieval, knowledge, ComparisonLLM(draft)
+        )
+
+
+@pytest.mark.parametrize("status", ["insufficient", "needs_clarification"])
+async def test_s4_does_not_rank_undecided_result(status: str) -> None:
+    """未决状态没有可靠 rank 时保留原顺序，不能由程序产生医学优先级。"""
+    evidence, localization, retrieval = setup()
+    knowledge = AsyncMock()
+    knowledge.search_differential.return_value = []
+    draft = ranked_result([None, None], status)
+    result = await compare_formula_candidates(
+        evidence, localization, retrieval, knowledge, ComparisonLLM(draft)
+    )
+    assert [p.candidate_id for p in result.ordered_paths] == ["ca", "cb"]
+    assert all(p.rank is None for p in result.ordered_paths)

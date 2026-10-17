@@ -6,11 +6,12 @@ Prompt 在异步线程读入；Schema 只由 Adapter 注入一次，禁止暴露
 import asyncio
 import json
 from pathlib import Path
+from typing import cast
 
 from backend.app.clinical_v2.schemas import ClinicalEvidenceV2, S1ExtractionDraft
 from backend.app.clinical_v2.verification import ExtractionInvalidError, validate_extraction
 from backend.app.core.exceptions import ProviderUnavailableError
-from backend.app.core.ports import StructuredLLM
+from backend.app.core.ports import ClinicalStreamingLLM, StructuredLLM
 
 
 class ClinicalLLMUnavailableError(ProviderUnavailableError):
@@ -43,12 +44,19 @@ async def extract_clinical_facts(
             ),
         },
     ]
+    deadline_factory = getattr(llm, "clinical_deadline", None)
+    deadline = deadline_factory("S1") if deadline_factory else None
     # 来源对齐失败只允许一次结构修复。仍由模型理解语义，程序不改极性或编造出处。
     for attempt in range(2):
         try:
-            draft = await llm.ainvoke_structured(messages, S1ExtractionDraft)
+            if hasattr(llm, "ainvoke_clinical_structured_stream"):
+                draft = await cast(ClinicalStreamingLLM, llm).ainvoke_clinical_structured_stream(
+                    messages, S1ExtractionDraft, stage="S1", deadline=deadline
+                )
+            else:
+                draft = await llm.ainvoke_structured(messages, S1ExtractionDraft)
         except ProviderUnavailableError as exc:
-            raise ClinicalLLMUnavailableError("S1 临床模型不可用") from exc
+            raise ClinicalLLMUnavailableError("S1 临床模型不可用", details=exc.details) from exc
         try:
             return validate_extraction(text, draft, revision=revision, terminology=terminology)
         except ExtractionInvalidError as exc:

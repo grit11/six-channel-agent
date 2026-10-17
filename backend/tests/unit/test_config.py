@@ -51,3 +51,17 @@ def test_secrets_are_redacted() -> None:
     )
     assert "private-key" not in repr(settings)
     assert "private-password" not in repr(settings)
+
+
+@pytest.mark.parametrize("effort", ["", "low", "high", "max"])
+def test_reasoning_effort_reads_environment(effort: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """推理强度可从环境读取，空值明确表示沿用供应商默认。"""
+    monkeypatch.setenv("LLM_REASONING_EFFORT", effort)
+    assert Settings(_env_file=None).llm_reasoning_effort == effort
+
+
+@pytest.mark.parametrize("effort", ["none", "medium", "disabled", "invalid"])
+def test_invalid_glm_reasoning_effort_is_rejected(effort: str) -> None:
+    """不接受 GLM-5.3 不支持的强度，避免请求时才被供应商拒绝。"""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, llm_reasoning_effort=effort)

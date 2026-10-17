@@ -78,7 +78,11 @@ class ReliableRuntime:
         logging.getLogger("six_channel").error(
             "v2_runtime_error consultation_id=%s thread_id=clinical-v2:%s "
             "request_id=%s cause_type=%s failure_code=%s error_category=%s "
-            "http_status=%s stage=%s error_message=%s",
+            "http_status=%s provider=%s model=%s response_format_enabled=%s "
+            "stream_options_enabled=%s finish_reason=%s saw_done=%s content_chars=%s "
+            "thinking_type=%s reasoning_effort=%s provider_error_code=%s "
+            "provider_error_param=%s stage=%s validation_rule=%s candidate_index=%s "
+            "conflicting_reference_count=%s repair_attempts=%s error_message=%s",
             identifier,
             identifier,
             None,
@@ -86,7 +90,22 @@ class ReliableRuntime:
             details.get("failure_code") or getattr(error, "code", None),
             details.get("error_category"),
             details.get("http_status"),
+            details.get("provider"),
+            details.get("model"),
+            details.get("response_format_enabled"),
+            details.get("stream_options_enabled"),
+            details.get("finish_reason"),
+            details.get("saw_done"),
+            details.get("content_chars"),
+            details.get("thinking_type"),
+            details.get("reasoning_effort"),
+            details.get("provider_error_code"),
+            details.get("provider_error_param"),
             details.get("stage"),
+            details.get("validation_rule"),
+            details.get("candidate_index"),
+            details.get("conflicting_reference_count"),
+            details.get("repair_attempts"),
             getattr(error, "message", None),
         )
 
@@ -174,7 +193,11 @@ class ReliableRuntime:
                 failure_code = (
                     exc.details.get("failure_code")
                     if isinstance(exc, ApplicationError) and exc.details.get("failure_code")
-                    else exc.code if isinstance(exc, ApplicationError) else "RUN_FAILED"
+                    else (
+                        exc.code
+                        if isinstance(exc, ApplicationError)
+                        else "RUN_TIMEOUT" if isinstance(exc, TimeoutError) else "RUN_FAILED"
+                    )
                 )
                 job.result = None
                 # 只有 S4 自身失败且 Checkpoint 仍停在 s4_compare 时允许只读兜底。
@@ -210,6 +233,23 @@ class ReliableRuntime:
                             "result_presentation": "s3_retrieval_only",
                         },
                     )
+                if (
+                    job.result is None
+                    and self.service.workflow is not None
+                    and (
+                        str(failure_code).startswith(("S1_", "S2_"))
+                        or str(failure_code) == "LOCALIZATION_INVALID"
+                    )
+                ):
+                    try:
+                        job.result = await self.service.workflow.clinical_failure_result(
+                            str(job.consultation_id),
+                            str(failure_code),
+                            current.raw_input,
+                            current.revision,
+                        )
+                    except ApplicationError as recovery_error:
+                        self._log(job.consultation_id, recovery_error)
                 if job.result is None:
                     job.result = {"status": "failed", "failure_code": str(failure_code)}
                 await self.store.emit(
@@ -251,6 +291,9 @@ class ReliableRuntime:
                 "result_presentation": state.get("result_presentation", "none"),
                 "retryable": bool(state.get("retryable", False)),
                 "s4_retry_count": retry_count,
+                "clinical_runtime_digest": state.get(
+                    "clinical_runtime_digest", current.clinical_runtime_digest
+                ),
                 "last_run_duration_ms": job.duration_ms,
             }
             if state.get("comparison") is not None and status in {

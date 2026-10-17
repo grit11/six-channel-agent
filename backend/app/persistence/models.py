@@ -7,7 +7,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, Uuid
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -104,3 +104,32 @@ class RuntimeRecordModel(Base):
     kind: Mapped[str] = mapped_column(String(32), primary_key=True)
     key: Mapped[str] = mapped_column(String(256), primary_key=True)
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class QASessionModel(Base):
+    """QA 独立会话，不关联临床线程；payload 是严格 QA DTO。"""
+
+    __tablename__ = "qa_sessions"
+    session_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(256), index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON().with_variant(JSONB(), "postgresql"))
+
+
+class QAMessageModel(Base):
+    """QA 用户/助手消息；助手 ID 同时作为唯一 turn_id。"""
+
+    __tablename__ = "qa_messages"
+    __table_args__ = (
+        UniqueConstraint("session_id", "sequence"),
+        UniqueConstraint("session_id", "client_message_id", "role"),
+        Index("ix_qa_messages_session_sequence", "session_id", "sequence"),
+    )
+    message_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    session_id: Mapped[UUID] = mapped_column(ForeignKey("qa_sessions.session_id"))
+    client_message_id: Mapped[UUID] = mapped_column(Uuid)
+    sequence: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String(16))
+    payload: Mapped[dict[str, object]] = mapped_column(JSON().with_variant(JSONB(), "postgresql"))

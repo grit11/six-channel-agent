@@ -66,6 +66,8 @@ class ConsultationSnapshot(BaseModel):
     result_presentation: Literal["none", "llm_compared", "s3_retrieval_only"] = "none"
     retryable: bool = False
     s4_retry_count: int = Field(default=0, ge=0)
+    clinical_retry_count: int = Field(default=0, ge=0)
+    clinical_runtime_digest: str | None = None
     last_run_duration_ms: int | None = None
     created_at: datetime
     updated_at: datetime

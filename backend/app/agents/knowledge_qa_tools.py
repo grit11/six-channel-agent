@@ -8,6 +8,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any, Literal, cast
 
 import httpx
@@ -103,6 +104,10 @@ class EvidenceRegistry:
     errors: list[str] = field(default_factory=list)
     tool_calls_used: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    markers: dict[str, int] = field(default_factory=dict)
+    cache_hits: int = 0
+    io_attempts: int = 0
+    on_event: Callable[[str, dict[str, object]], Awaitable[None]] | None = None
 
     def register(self, items: list[Evidence], tool_name: str) -> list[dict[str, object]]:
         """给已精确复核的证据分配稳定 [n] 标记，重复来源不新增编号。"""
@@ -111,9 +116,10 @@ class EvidenceRegistry:
             if item.knowledge_version != self.knowledge_version:
                 raise QAError("QA_INVALID_EVIDENCE_ID", "来源版本与当前知识快照不一致")
             self.evidence.setdefault(item.evidence_id, item.model_copy(deep=True))
+            self.markers.setdefault(item.evidence_id, len(self.markers) + 1)
             cards.append(
                 {
-                    "ref": f"[{list(self.evidence).index(item.evidence_id) + 1}]",
+                    "ref": f"[{self.markers[item.evidence_id]}]",
                     "evidence_id": item.evidence_id,
                     "knowledge_type": item.knowledge_type,
                     "title": evidence_title(item),
@@ -142,11 +148,41 @@ class KnowledgeToolFactory:
         self.registry = registry
         self.registry.snapshot_digest = knowledge.snapshot_digest
 
+    async def _read_with_retry(
+        self, operation: Callable[[], Awaitable[list[Evidence]]]
+    ) -> list[Evidence]:
+        """只对明确的连接失败或 429/5xx 重试一次；共享外层工具和整轮预算。"""
+        for attempt in range(2):
+            self.registry.io_attempts += 1
+            try:
+                return await operation()
+            except (ApplicationError, httpx.HTTPError) as exc:
+                cause: BaseException | None = exc
+                retryable = False
+                visited: set[int] = set()
+                while cause is not None and id(cause) not in visited:
+                    visited.add(id(cause))
+                    if isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout)):
+                        retryable = True
+                    if isinstance(cause, httpx.HTTPStatusError):
+                        retryable = cause.response.status_code in {429, 500, 502, 503, 504}
+                    cause = cause.__cause__
+                if attempt or not retryable:
+                    raise
+                if self.registry.on_event:
+                    await self.registry.on_event("qa.tool_retry", {"attempt": 1})
+                await asyncio.sleep(0.2)
+        raise RuntimeError("不可达的工具重试状态")
+
     async def _execute(
         self, name: str, args: ToolArgs, operation: Callable[[], Awaitable[list[Evidence]]]
     ) -> str:
         """单轮并行工具串行注册，缓存命中不重复 I/O；失败不静默改检索模式。"""
-        key = json.dumps([name, args.model_dump()], ensure_ascii=False, sort_keys=True)
+        key = json.dumps(
+            [self.registry.snapshot_digest, name, args.model_dump()],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         async with self.registry.lock:
             self.registry.tool_calls_used += 1
             if name not in self.registry.tools_used:
@@ -154,12 +190,16 @@ class KnowledgeToolFactory:
             if self.registry.tool_calls_used > 5:
                 raise QAError("QA_TOOL_LIMIT_EXCEEDED", "本轮工具调用预算已耗尽")
             if key in self.registry.cache:
+                self.registry.cache_hits += 1
                 return self.registry.cache[key]
+            started = perf_counter()
+            if self.registry.on_event:
+                await self.registry.on_event("qa.tool_started", {"name": name, "attempt": 0})
             try:
                 async with asyncio.timeout(TOOL_TIMEOUT_SECONDS):
                     if self.knowledge.snapshot_digest != self.registry.snapshot_digest:
                         raise KnowledgeRetrievalError("知识快照在当前轮发生变化")
-                    hits = await operation()
+                    hits = await self._read_with_retry(operation)
                     # 每个 ID 精确复核后才注册，检索片段不能冒充原文。
                     ids = list(dict.fromkeys(item.evidence_id for item in hits))[:8]
                     originals = await self.knowledge.get_evidence_by_ids(ids) if ids else []
@@ -185,7 +225,7 @@ class KnowledgeToolFactory:
                     "error_code": "QA_TOOL_TIMEOUT",
                     "items": [],
                 }
-            except ApplicationError:
+            except (ApplicationError, httpx.HTTPError):
                 self.registry.errors.append("QA_TOOL_UNAVAILABLE")
                 result = {
                     "status": "error",
@@ -194,6 +234,16 @@ class KnowledgeToolFactory:
                     "items": [],
                 }
             output = json.dumps(result, ensure_ascii=False)
+            if self.registry.on_event:
+                await self.registry.on_event(
+                    "qa.tool_finished",
+                    {
+                        "name": name,
+                        "duration_ms": int((perf_counter() - started) * 1000),
+                        "source_count": result.get("total_count", 0),
+                        "error_code": result.get("error_code"),
+                    },
+                )
             # 正常/空结果才缓存，暂时故障不阻止模型在预算内修正调用。
             if result["status"] != "error":
                 self.registry.cache[key] = output

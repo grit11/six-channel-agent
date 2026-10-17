@@ -14,7 +14,11 @@ except ImportError:  # pragma: no cover - optional until QA mode is enabled
     ChatOpenAI = None  # type: ignore[misc,assignment]
 from backend.app.core.config import Settings
 from backend.app.core.exceptions import KnowledgeRetrievalError, PersistenceError
-from backend.app.core.llm import HTTPStructuredLLM, validate_llm_config
+from backend.app.core.llm import (
+    HTTPStructuredLLM,
+    build_llm_provider_options,
+    validate_llm_config,
+)
 from backend.app.core.logging import log_backend_event
 from backend.app.core.ports import EmbeddingProvider, S4StreamPolicy, StructuredLLM
 from backend.app.knowledge.service import KnowledgeService
@@ -23,6 +27,7 @@ from backend.app.persistence.checkpoint import (
     build_checkpoint_runtime,
 )
 from backend.app.persistence.database import DatabaseRuntime, open_database
+from backend.app.persistence.qa_repository import QARepository
 from backend.app.persistence.repositories import (
     ConsultationRepository,
 )
@@ -98,8 +103,8 @@ async def open_reranker(settings: Settings) -> AsyncIterator[Reranker]:
         yield HTTPReranker(settings, client)
 
 
-def build_qa_chat_model(settings: Settings):
-    """基于现有 LLM_* 配置构造 QA 专用 ChatOpenAI，不改变临床 HTTPStructuredLLM。"""
+def build_qa_chat_model(settings: Settings) -> ChatOpenAI:
+    """初始化 QA ChatOpenAI，复用共享供应商配置，不改变 Agent 与工具流程。"""
     if ChatOpenAI is None:
         raise KnowledgeRetrievalError("QA LangChain 依赖未安装")
     if not settings.llm_base_url or not settings.llm_model:
@@ -109,8 +114,10 @@ def build_qa_chat_model(settings: Settings):
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url.rstrip("/"),
         temperature=settings.llm_temperature,
+        extra_body=build_llm_provider_options(settings) or None,
         timeout=settings.llm_timeout_seconds,
-        max_retries=settings.llm_max_retries,
+        # QA 单轮服务拥有绝对预算，SDK 不叠加完整请求重试。
+        max_retries=0,
     )
 
 
@@ -263,6 +270,11 @@ async def open_container(settings: Settings) -> AsyncIterator[ApplicationContain
         qa_model = None
         if settings.knowledge_qa_mode == "llm" and llm is not None:
             qa_model = build_qa_chat_model(settings)
+        qa_engine = database.engine if settings.qa_storage != "memory" else None
+        if settings.qa_storage == "postgres" and qa_engine is None:
+            raise PersistenceError("QA PostgreSQL 历史不可用")
+        if settings.app_env == "prod" and qa_engine is None:
+            raise PersistenceError("生产 QA 禁止临时内存历史")
         yield ApplicationContainer(
             settings,
             vector,
@@ -272,6 +284,10 @@ async def open_container(settings: Settings) -> AsyncIterator[ApplicationContain
             KnowledgeQAService(
                 knowledge,
                 KnowledgeQAAgent(knowledge, qa_model),
+                QARepository(qa_engine),
+                total_seconds=settings.qa_total_seconds,
+                context_tokens=settings.qa_context_tokens,
+                heartbeat_seconds=settings.sse_heartbeat_seconds,
             ),
             clinical_v2,
             consultation_service,
