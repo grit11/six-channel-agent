@@ -7,7 +7,6 @@ from typing import Any
 
 import httpx
 import pytest
-
 from eval.v2_online_eval import run
 
 

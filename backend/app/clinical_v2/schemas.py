@@ -170,6 +170,15 @@ class RetrievalQueryPlanV2(V2Model):
     differential_query: str | None = None
     rescue_query: str | None = None
     filter_mode: Literal["soft_channel", "open_recovery"]
+    query_variant: Literal["Q0_baseline"] = "Q0_baseline"
+    positive_fact_ids: list[str] = Field(default_factory=list)
+    negative_fact_ids: list[str] = Field(default_factory=list)
+    treatment_after_fact_ids: list[str] = Field(default_factory=list)
+    excluded_temporal_fact_ids: dict[str, str] = Field(default_factory=dict)
+    primary_channel_indices: list[int] = Field(default_factory=list)
+    secondary_channel_indices: list[int] = Field(default_factory=list)
+    primary_focus_indices: list[int] = Field(default_factory=list)
+    secondary_focus_indices: list[int] = Field(default_factory=list)
 
 
 class EvidenceRefV2(V2Model):
@@ -207,8 +216,32 @@ class RetrievalBundleV2(V2Model):
     retrieval_status: Literal["ok", "partial", "no_relevant_evidence"]
 
 
+class CandidateComparisonDraftV2(V2Model):
+    """S4 模型草稿；只表达相对比较，不生成工程身份或来源签名。"""
+
+    candidate_id: str = Field(min_length=1)
+    six_channels: list[SixChannel] = Field(min_length=1, max_length=6)
+    rank: int | None = Field(default=None, ge=1, le=3)
+    support_fact_ids: list[str]
+    counter_fact_ids: list[str]
+    missing_dimensions: list[str]
+    support_evidence_ids: list[str]
+    counter_evidence_ids: list[str]
+    brief_rationale: str = Field(max_length=120)
+    differential_summary: str = Field(max_length=500)
+
+
+class ComparisonDraftV2(V2Model):
+    """S4 模型输出草稿；工程发布字段由程序绑定。"""
+
+    status: Literal["ranked", "insufficient", "needs_clarification"]
+    ordered_paths: list[CandidateComparisonDraftV2] = Field(max_length=3)
+    next_questions: list[ClarificationQuestionV2] = Field(default_factory=list, max_length=3)
+    unresolved_reason: str | None = None
+
+
 class CandidateComparisonV2(V2Model):
-    """S4 的相对顺序和来源引用；没有数值诊断分。"""
+    """S4 发布对象；工程身份、方名和核验状态由程序签发。"""
 
     path_id: str
     candidate_id: str
@@ -230,6 +263,11 @@ class ComparisonV2(V2Model):
 
     status: Literal["ranked", "insufficient", "needs_clarification"]
     ordered_paths: list[CandidateComparisonV2] = Field(max_length=3)
+    provisional_candidates: list[CandidateComparisonV2] = Field(
+        default_factory=list,
+        max_length=3,
+        description="未决状态下的探索候选，不构成正式排名",
+    )
     next_questions: list[ClarificationQuestionV2] = Field(default_factory=list, max_length=3)
     unresolved_reason: str | None = None
     source_evidence: list[EvidenceRefV2] = Field(default_factory=list)

@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from backend.app.clinical_v2.schemas import (
     ChannelLocalizationV2,
+    ComparisonDraftV2,
     ComparisonV2,
     S1ExtractionDraft,
 )
@@ -198,7 +199,7 @@ class FullLLM:
                     "note": "可检索",
                 }
             )
-        assert schema is ComparisonV2
+        assert schema is ComparisonDraftV2
         import json
 
         payload = json.loads(messages[-1]["content"])
@@ -211,10 +212,8 @@ class FullLLM:
                 "status": "ranked",
                 "ordered_paths": [
                     {
-                        "path_id": "path-1",
                         "candidate_id": first["candidate_id"],
                         "six_channels": ["太阳"],
-                        "formula_name": first["formula_name"],
                         "rank": 1,
                         "support_fact_ids": [fact_id],
                         "counter_fact_ids": [],
@@ -223,7 +222,6 @@ class FullLLM:
                         "counter_evidence_ids": [],
                         "brief_rationale": "来源支持",
                         "differential_summary": "暂无",
-                        "verification_status": "pending",
                     }
                 ],
                 "next_questions": [],
@@ -272,7 +270,7 @@ async def test_s1_to_s5_review_resume(tmp_path: Path) -> None:
         assert completed["status"] == "completed"
         assert completed["review"]["action"] == "accept"
         assert not (await graph.aget_state(config)).next
-        assert llm.calls == ["S1ExtractionDraft", "ChannelLocalizationV2", "ComparisonV2"]
+        assert llm.calls == ["S1ExtractionDraft", "ChannelLocalizationV2", "ComparisonDraftV2"]
 
 
 async def test_s4_failure_publishes_read_only_fallback(tmp_path: Path) -> None:

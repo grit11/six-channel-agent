@@ -47,3 +47,27 @@ def test_repeated_source_requires_occurrence() -> None:
     )
     result = validate_extraction("头疼痛，腹疼痛", draft)
     assert result.findings[0].source_span.start != result.findings[1].source_span.start
+
+
+def test_compound_pulse_span_can_support_distinct_concepts() -> None:
+    """同一复合脉象片段可拆成不同概念，但不能重复声明同一概念。"""
+    draft = S1ExtractionDraft(
+        findings=[
+            {
+                "local_id": "floating",
+                "concept": "脉浮",
+                "polarity": "positive",
+                "time_scope": "current",
+                "source_text": "脉浮而紧",
+            },
+            {
+                "local_id": "tight",
+                "concept": "脉紧",
+                "polarity": "positive",
+                "time_scope": "current",
+                "source_text": "脉浮而紧",
+            },
+        ]
+    )
+    result = validate_extraction("脉浮而紧", draft)
+    assert [item.concept for item in result.findings] == ["脉浮", "脉紧"]

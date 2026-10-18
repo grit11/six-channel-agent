@@ -331,7 +331,11 @@ class ConsultationService:
                 or not set(review.ordered_path_ids).issubset(paths)
             ):
                 raise InvalidBusinessRequestError("人工路径顺序引用无效")
-            if review.action == "accept" and not paths:
+            if review.action == "accept" and (
+                not paths
+                or snapshot.comparison is None
+                or snapshot.comparison.status != "ranked"
+            ):
                 raise InvalidBusinessRequestError("未决结果不能接受为已辨证结论")
             if review.action != "add_evidence":
                 return

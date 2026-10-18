@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from backend.app.clinical_v2.comparison import ComparisonUngroundedError, compare_formula_candidates
-from backend.app.clinical_v2.schemas import ComparisonV2
+from backend.app.clinical_v2.schemas import ComparisonDraftV2, ComparisonV2
 from backend.tests.v2.test_s4_comparison import ComparisonLLM, setup
 
 
@@ -37,6 +37,11 @@ def comparison() -> ComparisonV2:
             }
         ],
     )
+
+
+def draft_fields_are_model_owned() -> set[str]:
+    """草稿协议不允许模型生成工程身份、方名或来源签名。"""
+    return set(ComparisonDraftV2.model_fields)
 
 
 @pytest.mark.parametrize(
@@ -76,3 +81,13 @@ async def test_source_payload_is_signed_by_program() -> None:
         checked.source_evidence[0].excerpt
         == retrieval.formula_candidates[0].source_evidence[0].excerpt
     )
+
+
+def test_draft_excludes_program_signed_fields() -> None:
+    """草稿 schema 不暴露程序签发字段。"""
+    assert not {
+        "path_id",
+        "formula_name",
+        "verification_status",
+        "source_evidence",
+    } & draft_fields_are_model_owned()

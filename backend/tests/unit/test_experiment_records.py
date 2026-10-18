@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import httpx
+from eval.experiment_records import ExperimentRecords, safe_event, usage_summary
 from pydantic import BaseModel, ValidationError
 
 from backend.app.core.exceptions import ApplicationError
@@ -14,7 +15,6 @@ from backend.app.core.logging import (
     logger,
     runtime_error_record,
 )
-from eval.experiment_records import ExperimentRecords, safe_event, usage_summary
 
 
 def test_runtime_schema_log_excludes_input_and_exception_message(tmp_path: Path) -> None:

@@ -13,8 +13,8 @@
 5. 不按固定权重、支持数或 Reranker 分数生成诊断分数。禁止 `confidence=0.9`、百分比分数、七因子权重分。`rank` 表达相对优先级；`status="ranked"` 时必须从 1 开始唯一连续，且 `ordered_paths` 按 rank 升序排列。无法区分优先级时返回未决或待补证状态，不输出并列的 ranked 结果。
 6. 明显缺失鉴别依据、出现来源冲突或候选均不充分时，返回 `status="insufficient"` 或 `needs_clarification`，不要强凑 Top-3。
 7. 不以历史医案升格经典；胡希恕指导卡仅作为辨证思路，不覆盖本轮已核实的患者事实和经典来源。
-8. 若输入已有真实鉴别文档，优先使用；如无足够候选对照依据，返回 `requested_differential_targets` 供调用方限额查证，不得在回答中假装已经检索。
-9. 只输出 `ComparisonV2` Pydantic JSON Schema，`brief_rationale` 每条建议不超过 80 中文字，`differential_summary` 每条不超过 180 中文字；不要复述病历、来源原文或 Schema，不输出隐藏推理过程。
+8. 若输入已有真实鉴别文档，优先使用；如无足够候选对照依据，直接返回 `insufficient` 或 `needs_clarification` 及必要的 `next_questions`。本阶段没有额外补检字段或工具，不得输出 `requested_differential_targets`。
+9. 只输出 `ComparisonDraftV2` Pydantic JSON Schema。不要输出 `path_id`、`formula_name`、`verification_status`、`source_evidence` 或任何 Schema 外字段；程序会根据 `candidate_id` 从真实候选池绑定方名和稳定路径身份。`brief_rationale` 每条建议不超过 80 中文字，`differential_summary` 每条不超过 180 中文字；不要复述病历、来源原文或 Schema，不输出隐藏推理过程。
 
 ## 理想比较方式（不是模型外显思维过程）
 
@@ -23,7 +23,7 @@
 ## 输出要求
 
 - `status`: `ranked | insufficient | needs_clarification`
-- `ordered_paths`: 最多 3 条，均需有效 candidate_id / fact_ids / evidence_ids
+- `ordered_paths`: 最多 3 条，均需有效 candidate_id / fact_ids / evidence_ids；不填写工程路径 ID、方名和核验状态
 - 每条包含 `support_fact_ids`、`counter_fact_ids`、`support_evidence_ids`、`counter_evidence_ids`、`missing_dimensions`、`brief_rationale`、`differential_summary`
 - `next_questions`: 最多 3 条，用于医生审核或补证；不增加无价值通用问诊
 - 若未能形成可靠排名，`ordered_paths=[]` 可以是合法输出，不是自动错误。

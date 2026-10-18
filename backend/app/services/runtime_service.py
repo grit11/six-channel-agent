@@ -203,7 +203,7 @@ class ReliableRuntime:
                     and self.service.workflow is not None
                     and (
                         str(failure_code).startswith(("S1_", "S2_"))
-                        or str(failure_code) == "LOCALIZATION_INVALID"
+                        or str(failure_code) in {"LOCALIZATION_INVALID", "EXTRACTION_INVALID"}
                     )
                 ):
                     try:

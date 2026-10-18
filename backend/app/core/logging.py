@@ -70,6 +70,10 @@ def runtime_error_record(identifier: UUID | None, error: BaseException | None) -
         "error_category",
         "stage",
         "validation_rule",
+        "field_path",
+        "item_index",
+        "schema_type",
+        "schema_errors",
         "candidate_index",
         "conflicting_reference_count",
         "repair_attempts",
@@ -87,6 +91,34 @@ def runtime_error_record(identifier: UUID | None, error: BaseException | None) -
         if isinstance(details, dict):
             for key in safe_keys:
                 value = details.get(key)
+                if key == "schema_errors" and isinstance(value, list):
+                    safe_errors = []
+                    for item in value[:30]:
+                        if not isinstance(item, dict):
+                            continue
+                        location = item.get("loc", [])
+                        if not isinstance(location, list):
+                            location = []
+                        safe_errors.append(
+                            {
+                                "loc": [
+                                    (
+                                        part
+                                        if isinstance(part, int)
+                                        else (
+                                            part
+                                            if isinstance(part, str)
+                                            and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", part)
+                                            else "<redacted>"
+                                        )
+                                    )
+                                    for part in location[:20]
+                                ],
+                                "type": str(item.get("type", "unknown"))[:100],
+                            }
+                        )
+                    record["schema_errors"] = safe_errors
+                    continue
                 if isinstance(value, (bool, int, float)) or (
                     isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", value)
                 ):

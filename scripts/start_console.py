@@ -15,9 +15,9 @@ from fastapi import FastAPI
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from backend.app.core.config import Settings  # noqa: E402
-from backend.app.core.logging import configure_diagnostic_file, logger  # noqa: E402
-from backend.app.main import create_app  # noqa: E402
+from backend.app.core.config import Settings
+from backend.app.core.logging import configure_diagnostic_file, logger
+from backend.app.main import create_app
 
 
 def run_console(app: FastAPI, port: int) -> None:

@@ -126,6 +126,7 @@ def build_clinical_v2_graph(
             comparison = ComparisonV2(
                 status="insufficient",
                 ordered_paths=[],
+                provisional_candidates=[],
                 unresolved_reason="无可比较来源",
             )
         else:
@@ -137,6 +138,8 @@ def build_clinical_v2_graph(
                 llm,
                 differential_top_k=differential_top_k,
                 s4_policy=s4_policy,
+                consultation_id=str(state["consultation_id"]),
+                revision=int(state.get("revision", 0)),
             )
         return {
             "comparison": comparison.model_dump(mode="json"),

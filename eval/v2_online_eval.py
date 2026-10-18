@@ -58,15 +58,15 @@ def collect_events(
         response.raise_for_status()
         page = response.json()
         if not isinstance(page, list):
-            raise ValueError("公开事件分页响应不是列表")
+            raise TypeError("公开事件分页响应不是列表")
         added = 0
         for item in page:
             if not isinstance(item, dict) or not isinstance(item.get("event_id"), str):
-                raise ValueError("公开事件缺少身份")
+                raise TypeError("公开事件缺少身份")
             if item.get("consultation_id") != identifier:
                 raise ValueError("公开事件会诊身份不匹配")
             if not isinstance(item.get("payload", {}), dict):
-                raise ValueError("公开事件payload不是对象")
+                raise TypeError("公开事件payload不是对象")
             if item["event_id"] not in seen:
                 event = safe_event(item)
                 events.append(event)
@@ -141,12 +141,109 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     ):
         values = [r["metrics"][name] for r in rows if r["metrics"].get(name) is not None]
         metrics[name] = sum(values) / len(values) if values else None
+
+    def detail(items: list[dict[str, Any]], key: str) -> dict[str, Any]:
+        eligible = [item for item in items if item["eligible"]]
+        excluded = [
+            {"case_id": item["case_id"], "reason": item["reason"]}
+            for item in items
+            if not item["eligible"]
+        ]
+        numerator = sum(item["hit"] for item in eligible)
+        return {
+            "numerator": numerator,
+            "denominator": len(eligible),
+            "eligibility": "case-specific reference and stage availability",
+            "excluded_case_ids/reasons": excluded,
+            "value": numerator / len(eligible) if eligible else None,
+            "metric_key": key,
+        }
+
+    ranked_items: list[dict[str, Any]] = []
+    provisional_items: list[dict[str, Any]] = []
+    top20_items: list[dict[str, Any]] = []
+    top5_items: list[dict[str, Any]] = []
+    technical_failure_by_stage: dict[str, int] = {}
+    for row in rows:
+        expected = set(row.get("expected_formulas", []))
+        result = row.get("result") or {}
+        retrieval = result.get("retrieval") or {}
+        names20 = [item.get("formula_name") for item in retrieval.get("formula_candidates", [])]
+        comparison = result.get("comparison") or {}
+        paths = comparison.get("ordered_paths", [])
+        status = comparison.get("status")
+        top = paths[0].get("formula_name") if paths else None
+        ranked_items.append(
+            {
+                "case_id": row.get("case_id"),
+                "eligible": bool(expected and status == "ranked" and paths),
+                "hit": int(top in expected),
+                "reason": "no_reference_or_not_ranked",
+            }
+        )
+        provisional_items.append(
+            {
+                "case_id": row.get("case_id"),
+                "eligible": bool(expected and paths),
+                "hit": int(top in expected),
+                "reason": "no_reference_or_no_path",
+            }
+        )
+        top20_items.append(
+            {
+                "case_id": row.get("case_id"),
+                "eligible": bool(expected and retrieval),
+                "hit": int(bool(expected & set(names20))),
+                "reason": "no_reference_or_not_in_s3",
+            }
+        )
+        top5_items.append(
+            {
+                "case_id": row.get("case_id"),
+                "eligible": bool(expected and retrieval),
+                "hit": int(bool(expected & set(names20[:5]))),
+                "reason": "no_reference_or_not_in_s3",
+            }
+        )
+        if row.get("error"):
+            stage = str(row.get("stage_observability", {}).get("failed_stage") or "unknown")
+            technical_failure_by_stage[stage] = technical_failure_by_stage.get(stage, 0) + 1
+    metric_details = {
+        "end_to_end_status_rate": {
+            "numerator": sum(bool(row.get("status")) for row in rows),
+            "denominator": len(rows),
+            "eligibility": "all recorded rows",
+            "excluded_case_ids/reasons": [],
+            "value": sum(bool(row.get("status")) for row in rows) / len(rows) if rows else None,
+        },
+        "technical_failure_rate_by_stage": technical_failure_by_stage,
+        "s4_ranked_top1_hit": detail(ranked_items, "s4_ranked_top1_hit"),
+        "s4_provisional_path_hit": detail(provisional_items, "s4_provisional_path_hit"),
+        "s3_reference_present_at_20": detail(top20_items, "s3_reference_present_at_20"),
+        "s3_reference_present_at_5": detail(top5_items, "s3_reference_present_at_5"),
+        "doctor_review_requested": {
+            "numerator": sum(row.get("status") == "awaiting_doctor_review" for row in rows),
+            "denominator": len(rows),
+            "eligibility": "all recorded rows",
+            "excluded_case_ids/reasons": [],
+        },
+        "doctor_review_approved": {
+            "numerator": sum(
+                (row.get("result") or {}).get("review", {}).get("action") in {"accept", "modify"}
+                for row in rows
+            ),
+            "denominator": len(rows),
+            "eligibility": "explicit doctor action only",
+            "excluded_case_ids/reasons": [],
+        },
+    }
     return {
         "count": len(rows),
         "failed": sum(bool(r["error"]) for r in rows),
         "p50_ms": percentile(latency, 0.5),
         "p95_ms": percentile(latency, 0.95),
         "metrics": metrics,
+        "metric_details": metric_details,
         "label_status": "研发银标；未作独立专家临床验证",
     }
 
@@ -283,8 +380,8 @@ def run(
             config.raise_for_status()
             current_config = config.json()
             if not isinstance(current_config, dict):
-                raise ValueError("配置响应不是对象")
-        except (httpx.HTTPError, ValueError) as exc:
+                raise TypeError("配置响应不是对象")
+        except (httpx.HTTPError, TypeError, ValueError) as exc:
             report["run_state"] = "interrupted"
             report["summary"] = summarize(report["rows"])
             session["ended_at_utc"] = utc_now()
@@ -404,6 +501,7 @@ def run(
                 expected_formulas = (
                     case.get("expected_formulas") or case.get("reference_formulas") or []
                 )
+                row["expected_formulas"] = expected_formulas
                 row["metrics"] = {
                     "channel_top1": recall(
                         hypotheses[0]["six_channels"] if hypotheses else [], expected_channels

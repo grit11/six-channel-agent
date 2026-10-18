@@ -30,10 +30,19 @@ async def extract_clinical_facts(
     """抽取且对齐原文事实，未提供的术语映射保持空值。"""
     if not text.strip() or len(text) > 20000:
         raise ValueError("病例原文须在 1 至 20000 字符之间")
-    prompt = await asyncio.to_thread(
-        (Path(__file__).parent / "prompts/s1_clinical_extract.md").read_text,
-        encoding="utf-8",
+    prompt_root = Path(__file__).parent / "prompts"
+    prompt, few_shot = await asyncio.gather(
+        asyncio.to_thread(
+            (prompt_root / "s1_clinical_extract.md").read_text,
+            encoding="utf-8",
+        ),
+        asyncio.to_thread(
+            (prompt_root / "s1_few_shot_v2_1.md").read_text,
+            encoding="utf-8",
+        ),
     )
+    # Few-shot 仅展示字段、时态和原文对齐行为，不提供六经或方证答案。
+    prompt = f"{prompt}\n\n{few_shot}"
     messages = [
         {"role": "system", "content": prompt},
         {

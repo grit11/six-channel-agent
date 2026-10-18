@@ -1,0 +1,103 @@
+{
+  "schema": "six-channel-standard36-silver/v1",
+  "created_utc": "2026-10-18T08:07:54.175602+00:00",
+  "dataset_file": "SixChannel_Standard36_Silver_v1.jsonl",
+  "dataset_sha256": "fc246dcfb897570bbcab833e7c394ee9d21de6a9694d0a082fb64ee53b03b8d7",
+  "original_dataset_sha256": "1f308bd9addb0e92901913f4fd5e3aa256ac24e2531e9f6e09a226f8047bd047",
+  "knowledge_version": "1.2",
+  "knowledge_repository": "grit11/six-channel-agent",
+  "knowledge_commit": "2c92be751fc7574b86812c97d0f34e69f000e2b5",
+  "num_cases": 36,
+  "groups": {
+    "太阳": {
+      "count": 6,
+      "formulas": [
+        "五苓散",
+        "大青龙汤",
+        "小青龙汤",
+        "桂枝汤",
+        "葛根汤",
+        "麻黄汤"
+      ]
+    },
+    "阳明": {
+      "count": 6,
+      "formulas": [
+        "大承气汤",
+        "小承气汤",
+        "猪苓汤",
+        "茵陈蒿汤",
+        "调胃承气汤",
+        "麻子仁丸"
+      ]
+    },
+    "少阳": {
+      "count": 6,
+      "formulas": [
+        "大柴胡汤",
+        "小柴胡汤",
+        "柴胡加龙骨牡蛎汤",
+        "柴胡桂枝干姜汤",
+        "柴胡桂枝汤"
+      ]
+    },
+    "太阴": {
+      "count": 6,
+      "formulas": [
+        "桂枝加大黄汤",
+        "桂枝加芍药汤",
+        "理中丸"
+      ]
+    },
+    "少阴": {
+      "count": 6,
+      "formulas": [
+        "四逆汤",
+        "桃花汤",
+        "真武汤",
+        "附子汤",
+        "麻黄细辛附子汤",
+        "黄连阿胶汤"
+      ]
+    },
+    "厥阴": {
+      "count": 6,
+      "formulas": [
+        "乌梅丸",
+        "吴茱萸汤",
+        "干姜黄芩黄连人参汤",
+        "当归四逆加吴茱萸生姜汤",
+        "当归四逆汤",
+        "白头翁汤"
+      ]
+    }
+  },
+  "decisions": {
+    "保留": 10,
+    "优化": 18,
+    "新增": 8
+  },
+  "review_status": "研发来源与标签一致性预审完成；中医专家最终盲审未完成",
+  "excluded_original_ids": [
+    "SC007",
+    "SC008",
+    "SC009",
+    "SC017",
+    "SC024",
+    "SC031",
+    "SC032",
+    "SC036",
+    "SC037",
+    "SC038",
+    "SC039",
+    "SC040",
+    "SC041",
+    "SC042",
+    "SC043",
+    "SC044",
+    "SC045",
+    "SC046",
+    "SC047",
+    "SC048"
+  ]
+}

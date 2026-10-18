@@ -11,6 +11,7 @@ class FakeLLM:
 
     def __init__(self, draft: S1ExtractionDraft) -> None:
         self.draft = draft
+        self.messages: list[dict[str, str]] = []
 
     async def ainvoke_text(self, messages: list[dict[str, str]]) -> str:
         """S1 不应调用文本端口。"""
@@ -19,6 +20,7 @@ class FakeLLM:
     async def ainvoke_structured(self, messages: list[dict[str, str]], schema: type) -> object:
         """返回结构化草稿。"""
         assert schema is S1ExtractionDraft
+        self.messages = messages
         return self.draft
 
 
@@ -53,10 +55,12 @@ async def test_s1_keeps_unmapped_findings_and_three_value_polarity() -> None:
         ],
         unresolved_phrases=[],
     )
-    result = await extract_clinical_facts(text, FakeLLM(draft))
+    llm = FakeLLM(draft)
+    result = await extract_clinical_facts(text, llm)
     assert [item.polarity for item in result.findings] == ["negative", "positive", "unknown"]
     assert result.findings[1].normalized_key is None
     assert result.findings[0].source_span.text == "汗始终出不来"
+    assert "V2.1 S1 Few-shot" in llm.messages[0]["content"]
 
 
 @pytest.mark.asyncio

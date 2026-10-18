@@ -4,6 +4,7 @@
 """
 
 import json
+import hashlib
 from unittest.mock import AsyncMock
 
 import pytest
@@ -17,6 +18,7 @@ from backend.app.clinical_v2.schemas import (
     CandidateComparisonV2,
     ChannelLocalizationV2,
     ClinicalEvidenceV2,
+    ComparisonDraftV2,
     ComparisonV2,
     FormulaEvidenceCandidateV2,
     RetrievalBundleV2,
@@ -29,9 +31,19 @@ from backend.app.schemas.evidence import Evidence
 class ComparisonLLM:
     """返回指定顺序的结构化比较结果。"""
 
-    def __init__(self, result: ComparisonV2) -> None:
+    def __init__(self, result: ComparisonV2 | ComparisonDraftV2) -> None:
         """保存返回对象与待核对的真实节点输入。"""
-        self.result = result
+        if isinstance(result, ComparisonV2):
+            payload = result.model_dump(mode="python")
+            payload.pop("source_evidence", None)
+            payload.pop("provisional_candidates", None)
+            for item in payload["ordered_paths"]:
+                item.pop("path_id", None)
+                item.pop("formula_name", None)
+                item.pop("verification_status", None)
+            self.result = ComparisonDraftV2.model_validate(payload)
+        else:
+            self.result = result
         self.messages: list[dict[str, str]] = []
 
     async def ainvoke_text(self, messages: list[dict[str, str]]) -> str:
@@ -40,9 +52,25 @@ class ComparisonLLM:
 
     async def ainvoke_structured(self, messages: list[dict[str, str]], schema: type) -> object:
         """返回模型相对顺序。"""
-        assert schema is ComparisonV2
+        assert schema is ComparisonDraftV2
         self.messages = messages
         return self.result
+
+
+class RepairingLLM(ComparisonLLM):
+    """第一次返回来源不完整草稿，第二次返回可签发草稿。"""
+
+    def __init__(self, first: ComparisonDraftV2, second: ComparisonDraftV2) -> None:
+        super().__init__(second)
+        self.results = [first, second]
+        self.calls = 0
+
+    async def ainvoke_structured(self, messages: list[dict[str, str]], schema: type) -> object:
+        assert schema is ComparisonDraftV2
+        self.messages = messages
+        result = self.results[min(self.calls, len(self.results) - 1)]
+        self.calls += 1
+        return result
 
 
 def setup() -> tuple[ClinicalEvidenceV2, ChannelLocalizationV2, RetrievalBundleV2]:
@@ -142,11 +170,20 @@ async def test_s4_preserves_llm_order_without_score_fields() -> None:
     knowledge = AsyncMock()
     knowledge.search_differential.return_value = []
     checked = await compare_formula_candidates(
-        evidence, localization, retrieval, knowledge, ComparisonLLM(result)
+        evidence,
+        localization,
+        retrieval,
+        knowledge,
+        ComparisonLLM(result),
+        consultation_id="consult-1",
+        revision=2,
     )
     assert checked.ordered_paths[0].candidate_id == "cb"
     assert "score" not in checked.ordered_paths[0].model_dump()
     assert checked.ordered_paths[0].verification_status == "grounded"
+    assert checked.ordered_paths[0].path_id == "path-" + hashlib.sha256(
+        b"consult-1:2:cb"
+    ).hexdigest()[:20]
     verified = verify_comparison_evidence(checked, evidence, retrieval)
     assert verified.ordered_paths[0].candidate_id == "cb"
 
@@ -398,5 +435,57 @@ async def test_s4_does_not_rank_undecided_result(status: str) -> None:
     result = await compare_formula_candidates(
         evidence, localization, retrieval, knowledge, ComparisonLLM(draft)
     )
-    assert [p.candidate_id for p in result.ordered_paths] == ["ca", "cb"]
-    assert all(p.rank is None for p in result.ordered_paths)
+    assert result.ordered_paths == []
+    assert [p.candidate_id for p in result.provisional_candidates] == ["ca", "cb"]
+    assert all(p.rank is None for p in result.provisional_candidates)
+
+
+async def test_s4_rejects_formal_rank_in_undecided_draft() -> None:
+    """未决状态即使带 rank 也不能发布为正式排名。"""
+    evidence, localization, retrieval = setup()
+    knowledge = AsyncMock()
+    knowledge.search_differential.return_value = []
+    draft = ranked_result([1], "needs_clarification")
+    with pytest.raises(ComparisonUngroundedError, match="未决状态"):
+        await compare_formula_candidates(
+            evidence, localization, retrieval, knowledge, ComparisonLLM(draft)
+        )
+
+
+async def test_s4_allows_one_restricted_structural_repair() -> None:
+    """结构/来源校验失败只触发一次受限修复，修复不改变候选池。"""
+    evidence, localization, retrieval = setup()
+    first = ComparisonDraftV2.model_validate(
+        {
+            "status": "ranked",
+            "ordered_paths": [
+                {
+                    "candidate_id": "cb",
+                    "six_channels": ["太阳"],
+                    "rank": 1,
+                    "support_fact_ids": ["fact-a"],
+                    "counter_fact_ids": [],
+                    "missing_dimensions": [],
+                    "support_evidence_ids": ["1.2:ca"],
+                    "counter_evidence_ids": [],
+                    "brief_rationale": "来源待纠正",
+                    "differential_summary": "测试",
+                }
+            ],
+        }
+    )
+    second = first.model_copy(
+        update={
+            "ordered_paths": [
+                first.ordered_paths[0].model_copy(update={"support_evidence_ids": ["1.2:cb"]})
+            ]
+        }
+    )
+    llm = RepairingLLM(first, second)
+    knowledge = AsyncMock()
+    knowledge.search_differential.return_value = []
+    result = await compare_formula_candidates(
+        evidence, localization, retrieval, knowledge, llm
+    )
+    assert llm.calls == 2
+    assert result.ordered_paths[0].candidate_id == "cb"

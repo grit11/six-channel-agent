@@ -243,6 +243,7 @@ class KnowledgeService:
         top_k: int,
         channels: list[str] | None = None,
         scopes: list[str] | None = None,
+        trace: dict[str, object] | None = None,
     ) -> list[Evidence]:
         """统一召回、去重和可选重排，故障明确抛出，不静默伪装另一检索方式。"""
         if not 1 <= top_k <= 50:
@@ -259,6 +260,20 @@ class KnowledgeService:
                     self._lexical_search, kind, query, recall_count, channels, scopes
                 )
             )
+            if trace is not None:
+                trace["bm25"] = {
+                    "pool_size": len(rankings["bm25"]),
+                    "items": [
+                        {"evidence_id": item.evidence_id, "rank": rank}
+                        for rank, item in enumerate(
+                            [
+                                self._evidence(self._records[d.knowledge_id])
+                                for d in rankings["bm25"]
+                            ],
+                            1,
+                        )
+                    ],
+                }
         if self._mode in {"dense", "hybrid"}:
             if self._embedding is None or self._vector is None or self._profile is None:
                 raise ConfigurationError("检索依赖未装配")
@@ -270,13 +285,46 @@ class KnowledgeService:
                 profile=self._profile,
                 filters={"channels": channels or [], "association_scope": scopes or []},
             )
+            if trace is not None:
+                trace["dense"] = {
+                    "pool_size": len(rankings["dense"]),
+                    "items": [
+                        {
+                            "evidence_id": f"{item.knowledge_version}:{item.knowledge_id}",
+                            "rank": rank,
+                        }
+                        for rank, item in enumerate(rankings["dense"], 1)
+                    ],
+                }
         documents = (
             reciprocal_rank_fusion(rankings, recall_count, self._rrf_constant)
             if self._mode == "hybrid"
             else next(iter(rankings.values()))
         )
+        if trace is not None:
+            trace["rrf"] = {
+                "pool_size": len(documents),
+                "items": [
+                    {
+                        "evidence_id": f"{item.knowledge_version}:{item.knowledge_id}",
+                        "rank": rank,
+                    }
+                    for rank, item in enumerate(documents, 1)
+                ],
+            }
         if self._reranker is not None:
             documents = await self._reranker.rerank(query, documents, top_k)
+            if trace is not None:
+                trace["reranker"] = {
+                    "pool_size": len(documents),
+                    "items": [
+                        {
+                            "evidence_id": f"{item.knowledge_version}:{item.knowledge_id}",
+                            "rank": rank,
+                        }
+                        for rank, item in enumerate(documents, 1)
+                    ],
+                }
         evidences = []
         for document in documents[:top_k]:
             record = self._records.get(document.knowledge_id)
@@ -291,6 +339,23 @@ class KnowledgeService:
             evidence.rerank_score = document.rerank_score
             evidence.channel_scores = document.channel_scores.copy()
             evidences.append(evidence)
+        if trace is not None:
+            trace["top_k"] = {
+                "pool_size": len(evidences),
+                "items": [
+                    {"evidence_id": item.evidence_id, "rank": rank}
+                    for rank, item in enumerate(evidences, 1)
+                ],
+            }
+            if kind == "formula_pattern":
+                trace["top20"] = [
+                    {
+                        "formula_name": str(item.metadata.get("formula_name", "")),
+                        "evidence_id": item.evidence_id,
+                        "rank": rank,
+                    }
+                    for rank, item in enumerate(evidences, 1)
+                ]
         await emit_progress(
             "retrieval_completed",
             {
@@ -382,9 +447,12 @@ class KnowledgeService:
         channels: list[str] | None = None,
         association_scope: list[str] | None = None,
         top_k: int = 8,
+        trace: dict[str, object] | None = None,
     ) -> list[Evidence]:
         """分别保留经典与医案派生归属，风险标签随 Evidence 返回。"""
-        return await self._search("formula_pattern", query, top_k, channels, association_scope)
+        return await self._search(
+            "formula_pattern", query, top_k, channels, association_scope, trace
+        )
 
     async def search_differential(
         self,
@@ -397,18 +465,34 @@ class KnowledgeService:
             raise ValueError("top_k 必须在 1 至 50 之间")
         exact: list[Evidence] = []
         wanted = {item.strip() for item in candidates if item.strip()}
+
+        def aliases(value: str) -> set[str]:
+            """只对方名与规范方名证后缀做来源核准别名，不泛化删除所有“证”。"""
+            return {value, f"{value}证"}
+
         for record in self._records.values():
             if record.knowledge_type != "differential":
                 continue
             labels = set(
                 TypeAdapter(list[str]).validate_python(record.metadata.get("candidates", []))
             )
-            if wanted and wanted.issubset(labels):
+            if wanted and all(aliases(value) & labels for value in wanted):
                 exact.append(self._evidence(record, method="candidate_pair_exact"))
         precise = exact
         if len(precise) >= top_k:
             return precise[:top_k]
-        related = await self._search("differential", query or " ".join(candidates), top_k)
+        # 定向检索按候选对展开，避免要求一张卡覆盖 S3 全部候选而漏掉高价值配对资料。
+        pair_queries = [
+            " ".join(pair)
+            for index, left in enumerate(sorted(wanted))
+            for right in sorted(wanted)[index + 1 :]
+            for pair in ([left, right], [f"{left}证", f"{right}证"])
+        ]
+        related: list[Evidence] = []
+        for pair_query in pair_queries or [query or " ".join(candidates)]:
+            related.extend(await self._search("differential", pair_query, top_k))
+            if len(related) >= top_k * 2:
+                break
         seen = {rule.knowledge_id for rule in precise}
         return (precise + [e for e in related if e.knowledge_id not in seen])[:top_k]
 

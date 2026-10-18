@@ -26,9 +26,18 @@ from backend.app.observability.progress import emit_progress, model_scope
 class ClinicalStageStreamError(ProviderUnavailableError):
     """S1/S2 安全技术错误，禁止携带部分正文，不影响 S4 错误契约。"""
 
-    def __init__(self, stage: str, category: str) -> None:
+    def __init__(
+        self,
+        stage: str,
+        category: str,
+        *,
+        details: dict[str, object] | None = None,
+    ) -> None:
         """保存阶段失败码及可安全恢复的技术分类。"""
-        super().__init__("临床模型传输未完成", details={"failure_code": f"{stage}_{category}"})
+        safe_details: dict[str, object] = {"failure_code": f"{stage}_{category}"}
+        if details:
+            safe_details.update(details)
+        super().__init__("临床模型传输未完成", details=safe_details)
 
 
 def validate_llm_config(settings: Settings) -> None:
@@ -62,6 +71,35 @@ class HTTPStructuredLLM:
         self._settings = settings
         self._client = client
         self._provider_options = build_llm_provider_options(settings)
+
+    @staticmethod
+    def _schema_error_details(error: ValidationError) -> dict[str, object]:
+        """投影结构错误的位置和类型，不保存 input、message 或模型正文。"""
+        errors: list[dict[str, object]] = []
+        for item in error.errors(include_url=False, include_context=False, include_input=False)[
+            :30
+        ]:
+            loc = [
+                (
+                    part
+                    if isinstance(part, int)
+                    else (
+                        part
+                        if isinstance(part, str) and part.replace("_", "a").isalnum()
+                        else "<redacted>"
+                    )
+                )
+                for part in item.get("loc", ())
+            ]
+            errors.append({"loc": loc, "type": item.get("type", "unknown")})
+        error_types = {str(item["type"]) for item in errors}
+        return {
+            "error_category": "schema_validation",
+            "validation_rule": (
+                "json_invalid" if "json_invalid" in error_types else "schema_invalid"
+            ),
+            "schema_errors": errors,
+        }
 
     async def _call(
         self, messages: list[dict[str, str]], *, structured: bool, usage: dict[str, object]
@@ -126,7 +164,21 @@ class HTTPStructuredLLM:
                     raise ProviderUnavailableError("LLM 服务拒绝请求") from exc
                 if attempt == self._settings.llm_max_retries:
                     raise ProviderUnavailableError("LLM 暂时不可用，重试次数已耗尽") from exc
-            except (httpx.TransportError, ValueError, ValidationError) as exc:
+            except ValidationError as exc:
+                if attempt == self._settings.llm_max_retries:
+                    details = self._schema_error_details(exc)
+                    details.update(
+                        failure_code=(
+                            "S2_JSON_INVALID"
+                            if details["validation_rule"] == "json_invalid"
+                            else "S2_RESPONSE_INVALID"
+                        ),
+                        schema_type=schema.__name__ if schema is not None else "unknown",
+                    )
+                    raise ProviderUnavailableError(
+                        "LLM 结构化响应校验失败", details=details
+                    ) from exc
+            except (httpx.TransportError, ValueError) as exc:
                 if attempt == self._settings.llm_max_retries:
                     raise ProviderUnavailableError("LLM 调用或结构化响应校验失败") from exc
             await asyncio.sleep(min(0.25 * 2**attempt, 2.0))
@@ -168,8 +220,12 @@ class HTTPStructuredLLM:
         ]
         for name in (
             "s1_clinical_extract.md",
+            "s1_few_shot_v2_1.md",
             "s2_channel_localize.md",
             "six_channel_reference.md",
+            "s4_formula_comparison.md",
+            "formula_discrimination_guide.md",
+            "s4_few_shot_v2_1.md",
         ):
             values.append(hashlib.sha256((root / "prompts" / name).read_bytes()).hexdigest())
         return hashlib.sha256(json.dumps(values).encode()).hexdigest()
@@ -350,7 +406,13 @@ class HTTPStructuredLLM:
                 raise ClinicalStageStreamError(stage, "PROVIDER_UNAVAILABLE") from exc
             except httpx.TransportError as exc:
                 raise ClinicalStageStreamError(stage, "STREAM_INTERRUPTED") from exc
-            except (ValueError, ValidationError, TypeError) as exc:
+            except ValidationError as exc:
+                raise ClinicalStageStreamError(
+                    stage,
+                    "RESPONSE_INVALID",
+                    details=self._schema_error_details(exc),
+                ) from exc
+            except (ValueError, TypeError) as exc:
                 raise ClinicalStageStreamError(stage, "RESPONSE_INVALID") from exc
         raise ClinicalStageStreamError(stage, "PROVIDER_UNAVAILABLE")
 

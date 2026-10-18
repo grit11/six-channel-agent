@@ -23,16 +23,26 @@ def build_query_plan(
     evidence: ClinicalEvidenceV2, localization: ChannelLocalizationV2
 ) -> RetrievalQueryPlanV2:
     """仅拼接已存在事实和模型检索焦点，绝不补造病例症状。"""
-    positive = [
-        item.concept
+    current_positive = [
+        item
         for item in evidence.findings
         if item.polarity == "positive" and item.time_scope in {"current", "unspecified"}
     ]
-    negative = [
-        item.concept
+    current_negative = [
+        item
         for item in evidence.findings
         if item.polarity == "negative" and item.time_scope in {"current", "unspecified"}
     ]
+    positive = [item.concept for item in current_positive]
+    negative = [item.concept for item in current_negative]
+    after_treatment = [
+        item
+        for item in evidence.findings
+        if item.time_scope == "after_treatment" and item.polarity == "positive"
+    ]
+    excluded_temporal = {
+        item.fact_id: "after_treatment_current_continuity_unconfirmed" for item in after_treatment
+    }
     focus = [
         phrase for candidate in localization.candidates for phrase in candidate.retrieval_focus
     ]
@@ -54,6 +64,14 @@ def build_query_plan(
         differential_query=differential,
         rescue_query=rescue,
         filter_mode="soft_channel",
+        positive_fact_ids=[item.fact_id for item in current_positive],
+        negative_fact_ids=[item.fact_id for item in current_negative],
+        treatment_after_fact_ids=[item.fact_id for item in after_treatment],
+        excluded_temporal_fact_ids=excluded_temporal,
+        primary_channel_indices=[0] if channels else [],
+        secondary_channel_indices=list(range(1, len(channels))),
+        primary_focus_indices=[0] if focus else [],
+        secondary_focus_indices=list(range(1, len(focus))),
     )
 
 
@@ -85,13 +103,36 @@ async def retrieve_formula_candidates(
     """分别检索主查询、对比查询与受控恢复查询，按真实方名去重。"""
     if not 1 <= max_candidates <= 5:
         raise ValueError("方证候选数必须在 1 至 5 之间")
-    formula_hits: list[Evidence] = await knowledge.search_formula(
-        plan.primary_query, channels=plan.channel_hypotheses or None, top_k=recall_count
+    trace: dict[str, object] = {
+        "query_variant": plan.query_variant,
+        "channel_filter_applied": False,
+        "rescue_status": "not_executed",
+    }
+
+    # soft_channel is an explicit open candidate mode: S2 channels remain query guidance,
+    # but cannot irreversibly remove cross-channel evidence before ranking.
+    async def search_formula_with_trace(
+        query: str, channels: list[str] | None = None
+    ) -> list[Evidence]:
+        """向新版知识服务传递追踪；兼容旧的只读测试端口。"""
+        try:
+            return await knowledge.search_formula(
+                query, channels=channels, top_k=recall_count, trace=trace
+            )
+        except TypeError as exc:
+            if "trace" not in str(exc):
+                raise
+            return await knowledge.search_formula(query, channels=channels, top_k=recall_count)
+
+    formula_hits: list[Evidence] = await search_formula_with_trace(
+        plan.primary_query,
+        channels=None if plan.filter_mode == "soft_channel" else plan.channel_hypotheses,
     )
     if len(formula_hits) < 10 and plan.rescue_query:
+        trace["rescue_status"] = "executed"
         rescue_plan = plan.model_copy(update={"filter_mode": "open_recovery"})
         assert rescue_plan.rescue_query is not None
-        formula_hits += await knowledge.search_formula(rescue_plan.rescue_query, top_k=recall_count)
+        formula_hits += await search_formula_with_trace(rescue_plan.rescue_query)
     grouped: dict[str, list[Evidence]] = defaultdict(list)
     for item in formula_hits:
         name = str(item.metadata.get("formula_name", "")).strip()
@@ -105,7 +146,10 @@ async def retrieve_formula_candidates(
         sources = items[:3]
         provenance: Literal["classic", "other_text", "historical_case"] = (
             "historical_case"
-            if any(item.metadata.get("association_scope") == "case_derived" for item in sources)
+            if any(
+                item.metadata.get("association_scope") == "case_derived_historical"
+                for item in sources
+            )
             else "classic"
         )
         candidates.append(
@@ -118,7 +162,15 @@ async def retrieve_formula_candidates(
                         for item in sources
                         for channel in cast(
                             list[object],
-                            item.metadata.get("canonical_six_channels", []),
+                            item.metadata.get(
+                                (
+                                    "canonical_six_channels"
+                                    if item.metadata.get("association_scope")
+                                    == "classic_clause_based"
+                                    else "case_derived_six_channels"
+                                ),
+                                item.metadata.get("canonical_six_channels", []),
+                            ),
                         )
                         if isinstance(channel, str)
                     )
@@ -141,6 +193,7 @@ async def retrieve_formula_candidates(
         retrieval_trace={
             "formula_hits": len(formula_hits),
             "distinct_formula_count": len(grouped),
+            **trace,
         },
         retrieval_status=status,
     )
