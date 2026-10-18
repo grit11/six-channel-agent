@@ -5,13 +5,13 @@
 """
 
 import asyncio
-import logging
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any
 from uuid import UUID, uuid4
 
 from backend.app.core.exceptions import ApplicationError
+from backend.app.core.logging import log_runtime_error
 from backend.app.observability.progress import progress_scope
 from backend.app.persistence.runtime import next_lease, receipt_context
 from backend.app.schemas.consultation import ConsultationSnapshot
@@ -72,42 +72,7 @@ class ReliableRuntime:
     @staticmethod
     def _log(identifier: UUID | None, error: BaseException | None) -> None:
         """记录可定位的失败分类；严禁写入密钥、病例正文或模型输出。"""
-        details = getattr(error, "details", {}) if error is not None else {}
-        if not isinstance(details, dict):
-            details = {}
-        logging.getLogger("six_channel").error(
-            "v2_runtime_error consultation_id=%s thread_id=clinical-v2:%s "
-            "request_id=%s cause_type=%s failure_code=%s error_category=%s "
-            "http_status=%s provider=%s model=%s response_format_enabled=%s "
-            "stream_options_enabled=%s finish_reason=%s saw_done=%s content_chars=%s "
-            "thinking_type=%s reasoning_effort=%s provider_error_code=%s "
-            "provider_error_param=%s stage=%s validation_rule=%s candidate_index=%s "
-            "conflicting_reference_count=%s repair_attempts=%s error_message=%s",
-            identifier,
-            identifier,
-            None,
-            type(error).__name__,
-            details.get("failure_code") or getattr(error, "code", None),
-            details.get("error_category"),
-            details.get("http_status"),
-            details.get("provider"),
-            details.get("model"),
-            details.get("response_format_enabled"),
-            details.get("stream_options_enabled"),
-            details.get("finish_reason"),
-            details.get("saw_done"),
-            details.get("content_chars"),
-            details.get("thinking_type"),
-            details.get("reasoning_effort"),
-            details.get("provider_error_code"),
-            details.get("provider_error_param"),
-            details.get("stage"),
-            details.get("validation_rule"),
-            details.get("candidate_index"),
-            details.get("conflicting_reference_count"),
-            details.get("repair_attempts"),
-            getattr(error, "message", None),
-        )
+        log_runtime_error(identifier, error)
 
     async def _loop(self) -> None:
         while not self.stopping:

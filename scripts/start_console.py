@@ -15,8 +15,9 @@ from fastapi import FastAPI
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from backend.app.core.config import Settings
-from backend.app.main import create_app
+from backend.app.core.config import Settings  # noqa: E402
+from backend.app.core.logging import configure_diagnostic_file, logger  # noqa: E402
+from backend.app.main import create_app  # noqa: E402
 
 
 def run_console(app: FastAPI, port: int) -> None:
@@ -35,16 +36,28 @@ def main() -> None:
     """使用副本内显式配置启动；模型故障不自动降级为固定演示结果。"""
     parser = argparse.ArgumentParser(description="六经辨证 Agent Console")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--diagnostic-log", type=Path, help="安全后端诊断JSONL路径，建议放项目目录外"
+    )
     args = parser.parse_args()
+    diagnostic_path = args.diagnostic_log.resolve() if args.diagnostic_log else None
     os.chdir(ROOT)
     configuration = ROOT / ".env"
     if not configuration.is_file():
         configuration = ROOT / ".env.example"
     # _env_file 是 BaseSettings 的运行时参数，Pydantic 静态生成签名未包含它。
-    settings = Settings(_env_file=configuration)  # type: ignore[call-arg]
-    print(f"Console: http://127.0.0.1:{args.port}/dashboard", flush=True)
-    print(f"Configuration: {configuration.name}", flush=True)
-    run_console(create_app(settings), args.port)
+    handler = configure_diagnostic_file(diagnostic_path, ROOT) if diagnostic_path else None
+    try:
+        settings = Settings(_env_file=configuration)  # type: ignore[call-arg]
+        print(f"Console: http://127.0.0.1:{args.port}/dashboard", flush=True)
+        print(f"Configuration: {configuration.name}", flush=True)
+        if diagnostic_path:
+            print(f"Safe diagnostics: {diagnostic_path}", flush=True)
+        run_console(create_app(settings), args.port)
+    finally:
+        if handler is not None:
+            logger.removeHandler(handler)
+            handler.close()
 
 
 if __name__ == "__main__":
